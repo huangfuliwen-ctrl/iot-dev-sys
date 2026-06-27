@@ -1,0 +1,19 @@
+{
+    "_comment": "云平台服务配置 — 不再包含设备端配置",
+    "service": {
+        "name": "dev-sys-cloud",
+        "instance_id": "001",
+        "mqtt_broker_uri": "tcp://127.0.0.1:1883",
+        "database_path": "/data/dev-sys-cloud/cloud.db",
+        "log_dir": "/var/log/dev-sys-cloud",
+        "log_level": "INFO"
+    },
+    "tenant": {
+        "default_tenant_id": "default",
+        "tenant_table": "tenants"
+    },
+    "offline_detection": {
+        "heartbeat_timeout_sec": 180,
+        "check_interval_sec": 30
+    }
+}

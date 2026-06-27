@@ -1,0 +1,29 @@
+{
+    "_comment": "云平台服务 MQTT 配置 — 特权客户端，通配符订阅所有租户设备消息",
+    "broker_uri": "tcp://127.0.0.1:1883",
+    "client_id": "cloud-platform-service-001",
+    "keep_alive_sec": 60,
+    "qos": 1,
+    "clean_session": false,
+    "reconnect_base_ms": 1000,
+    "reconnect_max_ms": 60000,
+
+    "wildcard_subscriptions": [
+        "+/iot/+/+/heartbeat",
+        "+/iot/+/+/event/post",
+        "+/iot/+/+/event/post_reply",
+        "+/iot/+/+/property/post",
+        "+/iot/+/+/property/set_reply",
+        "+/iot/+/+/ota/progress"
+    ],
+
+    "service_topics": {
+        "status": "cloud-platform/status"
+    },
+
+    "topic_format": {
+        "_note": "上行topic格式: {tenant_id}/iot/{product_id}/{device_id}/{type}/{sub}",
+        "example_uplink": "tenant_1/iot/coffee_v1/device_001/heartbeat",
+        "example_downlink": "tenant_1/iot/coffee_v1/device_001/ota/notify"
+    }
+}

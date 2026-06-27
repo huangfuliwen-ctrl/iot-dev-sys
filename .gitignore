@@ -1,0 +1,42 @@
+# Build outputs
+build/
+bin/
+lib/
+*.o
+*.a
+*.so
+*.so.*
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# CMake
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+CTestTestfile.cmake
+
+# Package
+*.deb
+*.rpm
+*.tar.gz
+
+# Logs
+*.log
+logs/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Device credentials (never commit!)
+device_cert.pem
+device_key.pem
+ca_cert.pem
+
+# Generated code
+gen/
