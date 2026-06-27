@@ -14,7 +14,7 @@ OrgManager::~OrgManager() = default;
 // CRUD
 // ============================================================
 StatusCode OrgManager::create_org(OrgInfo& info) {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
 
     // Validate parent
     if (info.parent_id != 0) {
@@ -70,7 +70,7 @@ StatusCode OrgManager::create_org(OrgInfo& info) {
 }
 
 StatusCode OrgManager::update_org(int32_t org_id, const OrgInfo& info) {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
 
     auto it = std::find_if(orgs_.begin(), orgs_.end(),
         [org_id](const OrgInfo& o) { return o.org_id == org_id; });
@@ -95,7 +95,7 @@ StatusCode OrgManager::update_org(int32_t org_id, const OrgInfo& info) {
 }
 
 StatusCode OrgManager::delete_org(int32_t org_id) {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
 
     auto it = std::find_if(orgs_.begin(), orgs_.end(),
         [org_id](const OrgInfo& o) { return o.org_id == org_id; });
@@ -113,7 +113,7 @@ StatusCode OrgManager::delete_org(int32_t org_id) {
 // Query
 // ============================================================
 std::optional<OrgInfo> OrgManager::get_org(int32_t org_id) const {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
     auto it = std::find_if(orgs_.begin(), orgs_.end(),
         [org_id](const OrgInfo& o) { return o.org_id == org_id; });
     if (it != orgs_.end()) return *it;
@@ -121,7 +121,7 @@ std::optional<OrgInfo> OrgManager::get_org(int32_t org_id) const {
 }
 
 std::optional<OrgInfo> OrgManager::get_org_by_tenant(const std::string& tenant_id) const {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
     auto it = std::find_if(orgs_.begin(), orgs_.end(),
         [&tenant_id](const OrgInfo& o) { return o.tenant_id == tenant_id; });
     if (it != orgs_.end()) return *it;
@@ -131,7 +131,7 @@ std::optional<OrgInfo> OrgManager::get_org_by_tenant(const std::string& tenant_i
 std::vector<OrgInfo> OrgManager::list_orgs(int32_t parent_id,
                                             const std::string& org_type,
                                             bool active_only) const {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
     std::vector<OrgInfo> result;
     for (const auto& o : orgs_) {
         if (active_only && !o.is_active) continue;
@@ -143,7 +143,7 @@ std::vector<OrgInfo> OrgManager::list_orgs(int32_t parent_id,
 }
 
 OrgTreeNode OrgManager::get_org_tree() const {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
     OrgTreeNode root;
     // Build the tree array directly from root nodes
     for (const auto& o : orgs_) {
@@ -173,7 +173,7 @@ std::vector<OrgTreeNode> OrgManager::build_tree(int32_t parent_id) const {
 }
 
 std::vector<OrgInfo> OrgManager::get_descendants(int32_t org_id) const {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
     std::vector<OrgInfo> result;
     auto self = get_org(org_id);
     if (!self) return result;
@@ -196,7 +196,7 @@ std::vector<int32_t> OrgManager::get_org_scope(int32_t org_id) const {
 }
 
 int32_t OrgManager::org_count() const {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
     return static_cast<int32_t>(orgs_.size());
 }
 
@@ -205,13 +205,13 @@ bool OrgManager::org_exists(int32_t org_id) const {
 }
 
 bool OrgManager::tenant_exists(const std::string& tenant_id) const {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
     return std::any_of(orgs_.begin(), orgs_.end(),
         [&tenant_id](const OrgInfo& o) { return o.tenant_id == tenant_id; });
 }
 
 bool OrgManager::has_children(int32_t org_id) const {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
     return std::any_of(orgs_.begin(), orgs_.end(),
         [org_id](const OrgInfo& o) { return o.parent_id == org_id && o.is_active; });
 }

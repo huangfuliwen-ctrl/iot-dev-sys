@@ -5,6 +5,7 @@
 #include <chrono>
 #include <sstream>
 #include <functional>
+#include <set>
 
 // App layer
 #include "app/message_router.h"
@@ -33,6 +34,23 @@ void signal_handler(int sig) {
     (void)sig;
     std::cout << "\n[Main] Shutting down (signal " << sig << ")..." << std::endl;
     g_running = false;
+}
+
+// ============================================================
+// Auth Helper — extract & verify Bearer token from request
+// Returns std::nullopt if token is missing/invalid
+// ============================================================
+static std::optional<TokenPayload> extract_auth(const HttpRequest& req, AccountManager& acct_mgr) {
+    std::string token;
+    auto it = req.headers.find("Authorization");
+    if (it != req.headers.end() && it->second.find("Bearer ") == 0)
+        token = it->second.substr(7);
+    // Also support token in body for POST/PUT
+    if (token.empty())
+        token = JsonHelper::get_string(req.body, "token");
+    if (token.empty())
+        return std::nullopt;
+    return acct_mgr.verify_token(token);
 }
 
 // ============================================================
@@ -102,7 +120,7 @@ int main(int argc, char* argv[]) {
     org_mgr.seed_mock_data();
 
     AccountManager acct_mgr(&org_mgr);
-    acct_mgr.seed_mock_data();
+    acct_mgr.seed_mock_data(); // DEBUG
 
     // ======== Phase 2.5: HTTP API Server + Device Activation (REQ-DM-002) ========
     DeviceActivation activation(db);
@@ -173,10 +191,29 @@ int main(int argc, char* argv[]) {
             return ApiServer::json_response(http_status, json.str());
         });
 
-    // Device status query
+    // Device status query (supports org_scope filtering via Bearer token)
     api.get("/api/v1/device/status",
-        [&device_mgr](const HttpRequest&) -> HttpResponse {
+        [&device_mgr, &acct_mgr, &org_mgr](const HttpRequest& req) -> HttpResponse {
             auto devices = device_mgr.list_all_devices();
+
+            // Apply org_scope filter if valid token provided
+            auto tp = extract_auth(req, acct_mgr);
+            if (tp && tp->role_code != "super_admin") {
+                // Filter to only devices within the account's org scope
+                std::vector<Device> filtered;
+                std::set<std::string> visible_tenants;
+                for (int32_t oid : tp->org_scope) {
+                    auto org = org_mgr.get_org(oid);
+                    if (org) visible_tenants.insert(org->tenant_id);
+                }
+                for (const auto& dev : devices) {
+                    if (visible_tenants.count(dev.tenant_id)) {
+                        filtered.push_back(dev);
+                    }
+                }
+                devices = std::move(filtered);
+            }
+
             std::ostringstream json;
             json << "{\"total\":" << devices.size() << ",\"devices\":[";
             bool first = true;
@@ -950,54 +987,76 @@ int main(int argc, char* argv[]) {
         });
 
     // ================================================================
-    // Config & Tenant API (Mock — frontend preparation)
+    // Config & Tenant API
     // ================================================================
-    // List tenants
+    // List tenants — uses OrgManager for real org data + DeviceManager for counts
     api.get("/api/v1/tenants",
-        [&device_mgr](const HttpRequest&) -> HttpResponse {
-            auto tenants = device_mgr.list_tenants();
+        [&org_mgr, &device_mgr, &acct_mgr](const HttpRequest& req) -> HttpResponse {
+            auto orgs = org_mgr.list_orgs(-1, "", true);
+
+            // Apply org_scope filter if valid token provided
+            auto tp = extract_auth(req, acct_mgr);
+            if (tp && tp->role_code != "super_admin") {
+                std::set<int32_t> scope_set(tp->org_scope.begin(), tp->org_scope.end());
+                orgs.erase(std::remove_if(orgs.begin(), orgs.end(),
+                    [&scope_set](const OrgInfo& o) { return !scope_set.count(o.org_id); }),
+                    orgs.end());
+            }
+
             std::ostringstream json;
-            json << R"({"code":0,"message":"success","data":{"total":)" << tenants.size()
+            json << R"({"code":0,"message":"success","data":{"total":)" << orgs.size()
                  << R"(,"tenants":[)";
-            for (size_t i = 0; i < tenants.size(); i++) {
+            for (size_t i = 0; i < orgs.size(); i++) {
                 if (i > 0) json << ",";
                 json << "{"
-                     << R"("tenant_id":")" << tenants[i].tenant_id << R"(",)";
-                json << R"("name":")" << tenants[i].name << R"(",)";
-                json << R"("active":)" << (tenants[i].active ? "true" : "false") << ",";
-                json << R"("device_count":)" << device_mgr.device_count(tenants[i].tenant_id);
+                     << R"("org_id":)" << orgs[i].org_id << ","
+                     << R"("tenant_id":")" << orgs[i].tenant_id << R"(",)";
+                json << R"("org_name":")" << orgs[i].org_name << R"(",)";
+                json << R"("org_type":")" << orgs[i].org_type << R"(",)";
+                json << R"("parent_id":)" << orgs[i].parent_id << ","
+                     << R"("level":)" << orgs[i].level << ","
+                     << R"("path":")" << orgs[i].path << R"(",)";
+                json << R"("active":)" << (orgs[i].is_active ? "true" : "false") << ",";
+                json << R"("device_count":)" << device_mgr.device_count(orgs[i].tenant_id);
                 json << "}";
             }
             json << "]}}";
             return ApiServer::json_response(200, json.str());
         });
 
-    // Get tenant detail (registered AFTER /tenants/{id}/devices to avoid prefix conflict)
-    // Guard: reject if path contains extra segments beyond {tenant_id}
+    // Get tenant detail — uses OrgManager + DeviceManager
     api.get("/api/v1/tenants/{tenant_id}",
-        [&device_mgr](const HttpRequest& req) -> HttpResponse {
+        [&org_mgr, &device_mgr](const HttpRequest& req) -> HttpResponse {
             std::string tenant_id = req.path.substr(std::string("/api/v1/tenants/").size());
-            // Reject paths like /api/v1/tenants/foo/devices — those are for the other route
             if (tenant_id.find('/') != std::string::npos) {
                 return ApiServer::error_response(404, 1002, "Not found: " + req.path);
             }
+            auto org = org_mgr.get_org_by_tenant(tenant_id);
             int count = device_mgr.device_count(tenant_id);
             std::ostringstream json;
             json << R"({"code":0,"message":"success","data":{)";
             json << R"("tenant_id":")" << tenant_id << R"(",)";
+            if (org) {
+                json << R"("org_id":)" << org->org_id << ","
+                     << R"("org_name":")" << org->org_name << R"(",)";
+                json << R"("org_type":")" << org->org_type << R"(",)";
+                json << R"("parent_id":)" << org->parent_id << ","
+                     << R"("contact_name":")" << org->contact_name << R"(",)";
+                json << R"("contact_phone":")" << org->contact_phone << R"(",)";
+                json << R"("contact_email":")" << org->contact_email << R"(",)";
+            }
             json << R"("device_count":)" << count << ",";
-            json << R"("online_count":)" << (count > 0 ? count - 1 : 0); // mock: assume 1 offline
+            json << R"("online_count":)" << (count > 0 ? count - 1 : 0);
             json << "}}";
             return ApiServer::json_response(200, json.str());
         });
 
-    // List devices in tenant (registered BEFORE /tenants/{tenant_id} for correct matching)
+    // List devices in tenant
     api.get("/api/v1/tenants/{tenant_id}/devices",
         [&device_mgr](const HttpRequest& req) -> HttpResponse {
             std::string path = req.path;
             std::string prefix = "/api/v1/tenants/";
             std::string suffix = "/devices";
-            // Guard: only process paths ending with /devices
             if (path.size() < suffix.size()
                 || path.substr(path.size() - suffix.size()) != suffix) {
                 return ApiServer::error_response(404, 1002, "Not found: " + path);

@@ -50,7 +50,7 @@ private:
     std::string hash_password(const std::string& password) const;  // mock: simple hash
 
     OrgManager* org_mgr_;
-    mutable std::mutex mutex_;
+    mutable std::recursive_mutex mutex_;
     std::vector<AccountInfo> accounts_;
     std::vector<std::string> invalidated_tokens_;  // logout blacklist
     int32_t next_id_ = 1;

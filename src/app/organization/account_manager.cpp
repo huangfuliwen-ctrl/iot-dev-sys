@@ -76,7 +76,7 @@ AccountManager::~AccountManager() = default;
 // CRUD
 // ============================================================
 StatusCode AccountManager::create_account(AccountInfo& info, const std::string& password) {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
 
     // Validate username uniqueness
     if (get_account_by_username(info.username))
@@ -114,7 +114,7 @@ StatusCode AccountManager::create_account(AccountInfo& info, const std::string& 
 }
 
 StatusCode AccountManager::update_account(int32_t account_id, const AccountInfo& info) {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
 
     auto it = std::find_if(accounts_.begin(), accounts_.end(),
         [account_id](const AccountInfo& a) { return a.account_id == account_id; });
@@ -138,7 +138,7 @@ StatusCode AccountManager::update_account(int32_t account_id, const AccountInfo&
 StatusCode AccountManager::change_password(int32_t account_id,
                                             const std::string& old_password,
                                             const std::string& new_password) {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
 
     auto it = std::find_if(accounts_.begin(), accounts_.end(),
         [account_id](const AccountInfo& a) { return a.account_id == account_id; });
@@ -152,7 +152,7 @@ StatusCode AccountManager::change_password(int32_t account_id,
 }
 
 StatusCode AccountManager::delete_account(int32_t account_id) {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
 
     auto it = std::find_if(accounts_.begin(), accounts_.end(),
         [account_id](const AccountInfo& a) { return a.account_id == account_id; });
@@ -218,14 +218,14 @@ LoginResponse AccountManager::login(const LoginRequest& req) {
 }
 
 StatusCode AccountManager::logout(const std::string& token) {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
     invalidated_tokens_.push_back(token);
     return StatusCode::OK;
 }
 
 std::optional<TokenPayload> AccountManager::verify_token(const std::string& token) const {
     // Mock JWT verification — in production use a real JWT library
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
 
     // Check blacklist
     if (std::find(invalidated_tokens_.begin(), invalidated_tokens_.end(), token)
@@ -268,7 +268,7 @@ std::optional<TokenPayload> AccountManager::verify_token(const std::string& toke
 // Query
 // ============================================================
 std::optional<AccountInfo> AccountManager::get_account(int32_t account_id) const {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
     auto it = std::find_if(accounts_.begin(), accounts_.end(),
         [account_id](const AccountInfo& a) { return a.account_id == account_id; });
     if (it != accounts_.end()) {
@@ -280,7 +280,7 @@ std::optional<AccountInfo> AccountManager::get_account(int32_t account_id) const
 }
 
 std::optional<AccountInfo> AccountManager::get_account_by_username(const std::string& username) const {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
     auto it = std::find_if(accounts_.begin(), accounts_.end(),
         [&username](const AccountInfo& a) { return a.username == username; });
     if (it != accounts_.end()) return *it; // includes hash for internal use
@@ -290,7 +290,7 @@ std::optional<AccountInfo> AccountManager::get_account_by_username(const std::st
 std::vector<AccountInfo> AccountManager::list_accounts(int32_t org_id,
                                                          const std::string& role_code,
                                                          bool active_only) const {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
     std::vector<AccountInfo> result;
     for (auto a : accounts_) {
         if (active_only && !a.is_active) continue;
@@ -303,7 +303,7 @@ std::vector<AccountInfo> AccountManager::list_accounts(int32_t org_id,
 }
 
 int32_t AccountManager::account_count() const {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
     return static_cast<int32_t>(accounts_.size());
 }
 

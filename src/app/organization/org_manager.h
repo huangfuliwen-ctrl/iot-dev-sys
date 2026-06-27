@@ -44,7 +44,7 @@ public:
 private:
     std::vector<OrgTreeNode> build_tree(int32_t parent_id) const;
 
-    mutable std::mutex mutex_;
+    mutable std::recursive_mutex mutex_;
     std::vector<OrgInfo> orgs_;
     int32_t next_id_ = 1;
 };
