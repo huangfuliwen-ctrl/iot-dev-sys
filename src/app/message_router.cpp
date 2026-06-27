@@ -67,11 +67,58 @@ void MessageRouter::handle_heartbeat(const ParsedTopic& pt, const std::string& p
 }
 
 void MessageRouter::handle_event(const ParsedTopic& pt, const std::string& payload) {
-    // payload JSON: {event_type: "order_status"|"fault"|"device_status", ...data}
-    // TODO: Parse event_type from JSON and dispatch to order_mgr_ / fault_mgr_
-    // Example:
-    //   if (event_type == "order_status") order_mgr_->on_order_event(pt, payload);
-    //   if (event_type == "fault_alert")   fault_mgr_->on_fault_event(pt, payload);
+    // payload JSON: {event_type: "order_status"|"fault_alert"|"device_status", ...data}
+    std::string event_type = JsonHelper::get_string(payload, "event_type");
+
+    if (event_type == "order_status") {
+        // Order status change reported by device via MQTT (SRS 4.1.2 item 2)
+        // payload: {event_type:"order_status", order_id:"...", status:<int>, reason:"..."}
+        if (order_mgr_) {
+            std::string order_id = JsonHelper::get_string(payload, "order_id");
+            int status_code = JsonHelper::get_int(payload, "status", -1);
+            std::string reason = JsonHelper::get_string(payload, "reason");
+
+            if (order_id.empty()) {
+                std::cerr << "[Router] order_status event missing order_id" << std::endl;
+                return;
+            }
+
+            switch (status_code) {
+                case 1: // PAID
+                    order_mgr_->confirm_payment(order_id);
+                    break;
+                case 2: // BREWING
+                    order_mgr_->start_brewing(order_id);
+                    break;
+                case 3: // COMPLETED
+                    order_mgr_->complete_brewing(order_id);
+                    break;
+                case 4: // CANCELLED
+                    order_mgr_->cancel_order(order_id);
+                    break;
+                case 5: // FAILED
+                    order_mgr_->fail_brewing(order_id,
+                        reason.empty() ? "Device reported failure" : reason);
+                    break;
+                default:
+                    std::cerr << "[Router] Unknown order status code: " << status_code << std::endl;
+                    break;
+            }
+        }
+    } else if (event_type == "fault_alert") {
+        // Fault alert reported by device via MQTT (SRS 4.1.2 item 2)
+        if (fault_mgr_) {
+            fault_mgr_->on_fault_event(pt.tenant_id, pt.device_id, payload);
+        }
+    } else if (event_type == "device_status") {
+        // Device status change reported via MQTT
+        if (device_mgr_) {
+            device_mgr_->process_property(pt.tenant_id, pt.device_id, pt.product_id, payload);
+        }
+    } else {
+        std::cerr << "[Router] Unknown event_type: " << event_type
+                  << " from " << pt.device_id << std::endl;
+    }
 }
 
 void MessageRouter::handle_property(const ParsedTopic& pt, const std::string& payload) {

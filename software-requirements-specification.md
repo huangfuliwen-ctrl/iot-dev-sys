@@ -9,10 +9,11 @@
 | 项目 | 内容 |
 |------|------|
 | 文档名称 | IoT云平台服务程序软件需求规格说明书 |
-| 版本号 | V2.1 |
+| 版本号 | V2.2 |
 | 创建日期 | 2026-06-26 |
 | 修改日期 | 2026-06-27 |
 | 状态 | 修订中 |
+| 变更说明 | V2.2: 在4.1节明确划分MQTT与HTTP的通信职责边界，新增协议分工原则、MQTT/HTTP通信内容一览表、职责边界总结图 |
 
 ---
 
@@ -1102,71 +1103,99 @@ HTTP Request
 
 ## 4. 外部接口
 
-### 4.1 云平台通信
+### 4.1 云平台通信协议选型
 
 | 需求编号 | REQ-IF-001 |
 |----------|------------|
 | 名称 | 设备-云平台通信协议 |
 | 优先级 | 高 |
 
-| 项目 | 规格 |
-|------|------|
-| 主协议 | MQTT v3.1.1 / v5.0 |
-| 辅协议 | HTTPS (RESTful API) |
-| 传输安全 | TLS 1.2+ |
-| QoS | QoS 1（至少一次送达） |
-| Keep Alive | 60秒 |
-| 消息格式 | JSON（UTF-8） |
+#### 4.1.1 协议分工原则
 
-**MQTT Topic设计（多租户）：**
+设备与云平台之间采用 **MQTT + HTTP 双协议**，各司其职：
+
+| 维度 | MQTT | HTTP (HTTPS) |
+|------|------|--------------|
+| 通信模式 | 发布/订阅（Pub/Sub），支持推拉 | 请求/响应（Request/Response） |
+| 连接方向 | 长连接，双向推送 | 短连接，设备主动发起 |
+| 适用场景 | 实时数据流、事件推送、指令下发 | 大文件下载、一次性请求、批量同步 |
+| 消息大小 | 单条 ≤ 256KB | 支持大文件（固件包可达数百MB） |
+| QoS | QoS 1（至少一次送达） | 应用层重试保证 |
+| 协议版本 | MQTT v3.1.1 / v5.0 | HTTP/1.1 over TLS 1.2+ |
+| 数据格式 | JSON（UTF-8） | JSON（UTF-8） |
+| Keep Alive | 60秒 | 不适用 |
+
+#### 4.1.2 MQTT 通信（实时双向通道）
+
+MQTT 是设备与云平台之间的**主要通信通道**，承载所有实时、高频、双向的数据交互。
+
+**MQTT 通信内容一览：**
+
+| 序号 | 数据类别 | 方向 | Topic | 说明 |
+|------|---------|------|-------|------|
+| 1 | 心跳保活 | 设备→云 | `{tenant}/iot/{product}/{device}/heartbeat` | 定期上报设备在线状态、当前状态码、固件版本、信号强度、告警计数 |
+| 2 | 事件上报 | 设备→云 | `{tenant}/iot/{product}/{device}/event/post` | 订单状态变更（创建/支付/制作中/完成/取消/失败）、故障告警（L1-L4） |
+| 3 | 属性上报 | 设备→云 | `{tenant}/iot/{product}/{device}/property/post` | 设备运行属性（温度、流量、液位、功率等传感器数据）、设备状态变更 |
+| 4 | OTA进度上报 | 设备→云 | `{tenant}/iot/{product}/{device}/ota/progress` | 固件下载进度百分比、升级状态（下载中/安装中/成功/失败） |
+| 5 | 配置下发 | 云→设备 | `{tenant}/iot/{product}/{device}/property/set` | 云端主动推送配置变更（心跳间隔、清洗参数、亮度音量等） |
+| 6 | OTA升级通知 | 云→设备 | `{tenant}/iot/{product}/{device}/ota/notify` | 通知设备有新固件可用，包含下载URL、版本号、MD5/SHA256校验值 |
+| 7 | 远程指令 | 云→设备 | `{tenant}/iot/{product}/{device}/command/{cmd}` | 远程控制指令（重启、紧急停止、维护模式切换、锁定/解锁等） |
+| 8 | 遗嘱消息 | 设备→云 | MQTT Will Message | 设备异常断线时Broker自动发布离线通知，平台即时感知设备离线 |
+
+**MQTT Topic 设计（多租户）：**
 
 ```
-# 租户隔离在broker ACL层完成，设备端仅能访问所属租户的topic
-# 格式: {tenant_id}/iot/{product_id}/{device_id}/...
+# 格式: {tenant_id}/iot/{product_id}/{device_id}/{message_type}
 
-# 上行 (设备 → 云)
-{tenant}/iot/{product_id}/{device_id}/heartbeat       # 心跳
-{tenant}/iot/{product_id}/{device_id}/event/post      # 事件上报（订单状态/故障）
-{tenant}/iot/{product_id}/{device_id}/property/post   # 属性上报（设备状态/传感器）
-{tenant}/iot/{product_id}/{device_id}/ota/progress    # OTA进度
+# === 上行 (设备 → 云平台) ===
+{tenant}/iot/{product_id}/{device_id}/heartbeat       # 心跳保活
+{tenant}/iot/{product_id}/{device_id}/event/post      # 事件上报（订单状态/故障告警）
+{tenant}/iot/{product_id}/{device_id}/property/post   # 属性上报（传感器/设备状态）
+{tenant}/iot/{product_id}/{device_id}/ota/progress    # OTA升级进度
 
-# 下行 (云 → 设备)
-{tenant}/iot/{product_id}/{device_id}/property/set    # 属性设置
+# === 下行 (云平台 → 设备) ===
+{tenant}/iot/{product_id}/{device_id}/property/set    # 配置下发
 {tenant}/iot/{product_id}/{device_id}/ota/notify      # OTA升级通知
-{tenant}/iot/{product_id}/{device_id}/command/{cmd}   # 指令下发
+{tenant}/iot/{product_id}/{device_id}/command/{cmd}   # 远程指令
 
-# 云平台服务端（后端微服务，非设备端）
+# === 云平台服务端消费（通配符订阅） ===
 # 云端服务拥有全局权限，订阅通配符消费所有设备消息：
-{tenant}/iot/+/+/event/post       # 所有设备事件
-{tenant}/iot/+/+/heartbeat        # 所有设备心跳
-# 或通过 MQTT Broker → Kafka Bridge 将消息桥接到消息队列消费
++/iot/+/+/event/post       # 所有租户所有设备事件
++/iot/+/+/heartbeat        # 所有租户所有设备心跳
++/iot/+/+/property/post    # 所有租户所有设备属性
++/iot/+/+/ota/progress     # 所有租户所有设备OTA进度
 ```
 
-**需求描述：**
+**MQTT 通信要求：**
 
-1. MQTT断线自动重连，指数退避（1s→2s→4s→...→60s）
+1. 断线自动重连，指数退避（1s→2s→4s→...→60s上限）
 2. 消息体JSON格式，单条最大256KB
-3. HTTPS作为MQTT不可用时的降级通道
-4. 通信启用TLS双向认证
+3. 通信启用TLS双向认证（mTLS）
+4. 租户隔离在Broker ACL层完成，设备仅能访问所属租户的Topic
+5. 设备离线期间MQTT消息本地缓存，恢复连接后按时间顺序补传
 
-**HTTPS API（降级/补传/查询）：**
+#### 4.1.3 HTTP 通信（请求-响应通道）
 
-**设备端API：**
+HTTP 用于**不适合MQTT的场景**：大文件传输、设备首次激活、数据批量拉取、以及MQTT不可用时的降级通道。
 
-| 方法 | 路径 | 说明 |
-|------|------|------|
-| POST | /api/v1/device/activate | 设备激活注册 |
-| POST | /api/v1/device/heartbeat | 心跳上报（HTTP降级） |
-| POST | /api/v1/device/events | 批量事件上报 |
-| POST | /api/v1/device/properties | 批量属性上报 |
-| GET | /api/v1/device/config | 拉取最新配置 |
-| GET | /api/v1/device/ota/check | 检查固件更新 |
-| GET | /api/v1/device/ota/download | 下载固件升级包 |
-| POST | /api/v1/device/ota/callback | OTA结果回调 |
-| POST | /api/v1/orders/sync | 订单状态同步 |
-| GET | /api/v1/recipes/sync | 配方增量同步 |
+**HTTP 通信内容一览：**
 
-**管理后台API（前端调用）：**
+| 序号 | 数据类别 | 方法 | 路径 | 说明 |
+|------|---------|------|------|------|
+| 1 | 设备激活注册 | POST | `/api/v1/device/activate` | 设备首次上电，上报设备型号、固件版本、MAC地址，获取device_id和激活凭证 |
+| 2 | 固件包下载 | GET | `/api/v1/device/ota/download` | 下载固件升级包（文件可达数百MB），支持断点续传（Range请求） |
+| 3 | 固件更新检查 | GET | `/api/v1/device/ota/check` | 设备定时或手动检查是否有新固件 |
+| 4 | OTA结果回调 | POST | `/api/v1/device/ota/callback` | OTA升级完成后回调通知云端（HTTP兜底，正常走MQTT ota/progress） |
+| 5 | 配方同步 | GET | `/api/v1/recipes/sync` | 设备主动拉取配方增量更新（全量或增量，通过版本号/时间戳） |
+| 6 | 配置拉取 | GET | `/api/v1/device/config` | 设备启动时主动拉取最新配置 |
+| 7 | 心跳上报（降级） | POST | `/api/v1/device/heartbeat` | MQTT连接不可用时的HTTP降级心跳 |
+| 8 | 批量事件补传 | POST | `/api/v1/device/events` | MQTT不可用或离线恢复后，批量补传事件数据 |
+| 9 | 批量属性补传 | POST | `/api/v1/device/properties` | MQTT不可用或离线恢复后，批量补传属性数据 |
+| 10 | 订单状态同步（降级） | POST | `/api/v1/orders/sync` | MQTT不可用时HTTP降级同步订单状态 |
+
+**管理后台API（前端/管理端调用，非设备端）：**
+
+以下API均为前端管理界面调用，全部走 HTTPS RESTful 接口：
 
 **组织架构管理：**
 
@@ -1208,9 +1237,42 @@ HTTP Request
 | PUT | /api/v1/device-models/:model_id | 修改设备型号 |
 | DELETE | /api/v1/device-models/:model_id | 删除设备型号 |
 
+#### 4.1.4 MQTT 与 HTTP 职责边界总结
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    设备 ↔ 云平台 通信分工                          │
+│                                                                 │
+│  ┌───────────────────────────┐  ┌─────────────────────────────┐ │
+│  │     MQTT（长连接/实时）     │  │    HTTP（短连接/按需）        │ │
+│  │                           │  │                             │ │
+│  │  ✓ 心跳保活（60s周期）      │  │  ✓ 设备激活注册（一次性）      │ │
+│  │  ✓ 事件上报（订单/故障）    │  │  ✓ 固件包下载（大文件/断点续传）│ │
+│  │  ✓ 属性上报（传感器数据）    │  │  ✓ 配方同步（设备主动拉取）    │ │
+│  │  ✓ OTA进度上报             │  │  ✓ 配置拉取（启动时获取）      │ │
+│  │  ✓ 配置下发（云端主动推送）  │  │  ✓ 固件更新检查              │ │
+│  │  ✓ OTA升级通知             │  │  ✓ MQTT降级通道（心跳/事件    │ │
+│  │  ✓ 远程指令下发             │  │    补传/属性补传/订单同步）    │ │
+│  │  ✓ 遗嘱消息（离线感知）      │  │                             │ │
+│  │                           │  │  ─────────────────────       │ │
+│  │  特点：                    │  │  管理后台API（前端调用）：      │ │
+│  │  · 高频、实时、双向推送     │  │  · 组织架构CRUD              │ │
+│  │  · 消息体小（≤256KB）      │  │  · 账号认证与CRUD            │ │
+│  │  · 需要服务端主动推送       │  │  · 设备类型/型号管理          │ │
+│  └───────────────────────────┘  └─────────────────────────────┘ │
+│                                                                 │
+│  协议降级策略：                                                   │
+│  · 正常运行：MQTT为主通道，HTTP用于大文件下载和按需拉取              │
+│  · MQTT不可用：心跳/事件/属性/订单同步 降级为HTTP POST上报          │
+│  · 恢复连接：优先恢复MQTT通道，补传离线期间缓存数据                  │
+└─────────────────────────────────────────────────────────────────┘
+```
+
 **验收标准：**
-- 消息端到端延迟 ≤ 500ms
-- 安全链路建立 ≤ 5秒
+- MQTT消息端到端延迟 ≤ 500ms
+- HTTP API平均响应时间 ≤ 200ms（管理后台API）/ ≤ 2s（固件下载建立连接）
+- TLS安全链路建立 ≤ 5秒
+- MQTT→HTTP降级切换时间 ≤ 10秒
 
 ---
 

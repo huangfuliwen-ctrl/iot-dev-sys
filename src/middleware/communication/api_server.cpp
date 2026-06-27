@@ -154,10 +154,11 @@ void ApiServer::handle_connection(int client_fd) {
     HttpRequest req = parse_request(raw);
 
     // Route matching: supports {param} patterns
+    // Priority: exact match first, then pattern match
     HttpResponse resp;
     bool matched = false;
-    std::string method_path = req.method + " ";
 
+    // Phase 1: Try exact match first
     for (const auto& [route_key, handler] : impl_->routes) {
         size_t space = route_key.find(' ');
         if (space == std::string::npos) continue;
@@ -166,21 +167,38 @@ void ApiServer::handle_connection(int client_fd) {
 
         if (r_method != req.method) continue;
 
-        // Check if route has pattern parameter
-        size_t brace = r_path.find('{');
-        if (brace != std::string::npos) {
-            // Pattern match: compare prefix before {
-            std::string prefix = r_path.substr(0, brace);
-            if (req.path.find(prefix) == 0) {
-                resp = handler(req);
-                matched = true;
-                break;
-            }
-        } else if (r_path == req.path) {
-            // Exact match
+        // Only consider routes without pattern parameters
+        if (r_path.find('{') == std::string::npos && r_path == req.path) {
             resp = handler(req);
             matched = true;
             break;
+        }
+    }
+
+    // Phase 2: Try pattern match if no exact match found
+    if (!matched) {
+        for (const auto& [route_key, handler] : impl_->routes) {
+            size_t space = route_key.find(' ');
+            if (space == std::string::npos) continue;
+            std::string r_method = route_key.substr(0, space);
+            std::string r_path   = route_key.substr(space + 1);
+
+            if (r_method != req.method) continue;
+
+            size_t brace = r_path.find('{');
+            if (brace != std::string::npos) {
+                std::string prefix = r_path.substr(0, brace);
+                if (req.path.find(prefix) == 0) {
+                    // Verify the rest after prefix is not empty and doesn't contain '/'
+                    // This prevents /api/v1/orgs/tree from matching /api/v1/orgs/{id}
+                    std::string suffix = req.path.substr(prefix.size());
+                    if (!suffix.empty() && suffix.find('/') == std::string::npos) {
+                        resp = handler(req);
+                        matched = true;
+                        break;
+                    }
+                }
+            }
         }
     }
 

@@ -78,11 +78,16 @@ int main(int argc, char* argv[]) {
 
     // ======== Phase 1: Infrastructure ========
     LogManager log_mgr;
-    log_mgr.init("/var/log/dev-sys-cloud", LogManager::Level::INFO);
+    log_mgr.init("./logs", LogManager::Level::INFO);
 
     Database db;
-    if (db.open("./cloud.db") != StatusCode::OK) {
-        std::cerr << "[Main] Database open failed" << std::endl;
+    // PostgreSQL connection string (libpq format)
+    // When HAS_LIBPQ not defined, falls back to in-memory storage
+    const char* db_conn = std::getenv("DEV_SYS_DB");
+    std::string conn_str = db_conn ? db_conn
+        : "postgresql://devsys:devsys@127.0.0.1:5432/devsys_cloud";
+    if (db.open(conn_str) != StatusCode::OK) {
+        std::cerr << "[Main] Database open failed. Connection: " << conn_str << std::endl;
         return 1;
     }
 
@@ -102,6 +107,7 @@ int main(int argc, char* argv[]) {
 
     OrderManager order_mgr;
     OtaManager ota_mgr;
+    ota_mgr.set_device_manager(&device_mgr);
     FaultManager fault_mgr;
     RecipeManager recipe_mgr;
 
@@ -129,10 +135,21 @@ int main(int argc, char* argv[]) {
     DeviceTypeManager type_mgr(db);
 
     ApiServer api;
+
+    // Shared connection status for health endpoint reporting
+    auto mqtt_connected = std::make_shared<std::atomic<bool>>(false);
+    auto database_ok = std::make_shared<bool>(true);  // DB is initialized above
+
     // Health check
-    api.get("/api/v1/health", [](const HttpRequest&) -> HttpResponse {
-        return ApiServer::json_response(200,
-            R"({"status":"ok","service":"dev-sys-cloud","version":"1.0.0"})");
+    api.get("/api/v1/health", [mqtt_connected, database_ok](const HttpRequest&) -> HttpResponse {
+        std::ostringstream json;
+        json << R"({"status":"ok","service":"dev-sys-cloud","version":"1.0.0")"
+             << R"(,"uptime_seconds":)" << std::chrono::duration_cast<std::chrono::seconds>(
+                    std::chrono::steady_clock::now().time_since_epoch()).count()
+             << R"(,"mqtt_connected":)" << (mqtt_connected->load() ? "true" : "false")
+             << R"(,"database_ok":)" << (*database_ok ? "true" : "false")
+             << "}";
+        return ApiServer::json_response(200, json.str());
     });
 
     // Device activation endpoint (REQ-DM-002)
@@ -1098,7 +1115,7 @@ int main(int argc, char* argv[]) {
             json << R"("max_queue_depth":10,)";
             json << R"("api_port":8080,)";
             json << R"("log_level":"INFO",)";
-            json << R"("db_path":"/data/dev-sys-cloud/cloud.db")";
+            json << R"("db_conn":"postgresql://devsys@127.0.0.1:5432/devsys_cloud")";
             json << "}}";
             return ApiServer::json_response(200, json.str());
         });
@@ -1542,7 +1559,8 @@ int main(int argc, char* argv[]) {
         1);
 
     ServiceConfig svc_config;
-    svc_config.mqtt_broker_uri = "ssl://mqtt.example.com:8883";
+    const char* mqtt_uri = std::getenv("MQTT_BROKER_URI");
+    svc_config.mqtt_broker_uri = mqtt_uri ? mqtt_uri : "tcp://127.0.0.1:1883";
     svc_config.mqtt_client_id  = "cloud-platform-service-001";
 
     if (mqtt.connect(svc_config.mqtt_broker_uri,
@@ -1553,6 +1571,9 @@ int main(int argc, char* argv[]) {
         std::cerr << "[Main] MQTT connection failed, exiting" << std::endl;
         return 1;
     }
+
+    *mqtt_connected = true;
+    log_mgr.info("main", "MQTT connected to " + svc_config.mqtt_broker_uri);
 
     // 订阅所有设备上行topic（通配符）
     auto topics = MessageRouter::subscription_topics();
@@ -1569,8 +1590,9 @@ int main(int argc, char* argv[]) {
                  "Watching " + std::to_string(device_mgr.total_device_count()) + " devices.");
 
     // ======== Phase 5: Main loop ========
-    auto last_offline_check = std::chrono::steady_clock::now();
-    auto last_stats_report  = std::chrono::steady_clock::now();
+    auto last_offline_check   = std::chrono::steady_clock::now();
+    auto last_stats_report    = std::chrono::steady_clock::now();
+    auto last_mqtt_status_sync = std::chrono::steady_clock::now();
 
     while (g_running) {
         auto now = std::chrono::steady_clock::now();
@@ -1581,6 +1603,22 @@ int main(int argc, char* argv[]) {
         if (oc_elapsed >= 30) {
             device_mgr.check_offline_devices();
             last_offline_check = now;
+        }
+
+        // MQTT连接状态同步 (5s间隔)
+        auto ms_elapsed = std::chrono::duration_cast<std::chrono::seconds>(
+            now - last_mqtt_status_sync).count();
+        if (ms_elapsed >= 5) {
+            bool connected = mqtt.is_connected();
+            if (mqtt_connected->load() != connected) {
+                mqtt_connected->store(connected);
+                if (!connected) {
+                    log_mgr.warn("main", "MQTT connection lost");
+                } else {
+                    log_mgr.info("main", "MQTT connection restored");
+                }
+            }
+            last_mqtt_status_sync = now;
         }
 
         // 统计日志 (5分钟)

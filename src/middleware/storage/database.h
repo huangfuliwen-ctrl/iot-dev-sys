@@ -10,23 +10,31 @@
 namespace dev_sys {
 
 // ============================================================
-// Database (SQLite3 based)
+// Database — Abstract interface (PostgreSQL-backed)
+//
+// Connection string format:
+//   postgresql://[user[:password]@][host][:port][/dbname][?params]
+//   Example: "postgresql://devsys:password@127.0.0.1:5432/devsys_cloud"
+//
+// When built without HAS_LIBPQ, falls back to in-memory storage
+// (suitable for development/testing only).
 // ============================================================
 class Database {
 public:
     Database();
-    ~Database();
+    virtual ~Database();
 
-    StatusCode open(const std::string& db_path);
+    // Connection management
+    StatusCode open(const std::string& connection_string);
     StatusCode close();
     bool is_open() const;
 
-    // ======== Generic query ========
+    // ======== Generic SQL (for schema init / migrations) ========
     StatusCode execute(const std::string& sql);
     StatusCode query(const std::string& sql,
                      std::vector<std::vector<std::string>>& rows);
 
-    // ======== Device CRUD (REQ-DM-002) ========
+    // ======== Device CRUD ========
     StatusCode insert_device(const Device& device);
     StatusCode update_device(const Device& device);
     StatusCode upsert_device(const Device& device);
@@ -50,14 +58,14 @@ public:
                                bool success,
                                const std::string& message);
 
-    // ======== Device Types CRUD (dynamic, frontend-managed) ========
+    // ======== Device Types CRUD ========
     StatusCode insert_device_type(const DeviceTypeInfo& info);
     StatusCode update_device_type(const DeviceTypeInfo& info);
     StatusCode delete_device_type(const std::string& type_code);
     std::optional<DeviceTypeInfo> get_device_type(const std::string& type_code);
     std::vector<DeviceTypeInfo> list_device_types(bool active_only = false);
 
-    // ======== Device Models CRUD (dynamic, frontend-managed) ========
+    // ======== Device Models CRUD ========
     StatusCode insert_device_model(const DeviceModelInfo& info);
     StatusCode update_device_model(const DeviceModelInfo& info);
     StatusCode delete_device_model(const std::string& model_code);
@@ -83,7 +91,8 @@ public:
     StatusCode resolve_fault(const std::string& tenant_id, const std::string& device_id, int code);
     std::vector<FaultInfo> list_all_faults();
     std::vector<FaultInfo> list_active_faults();
-    std::vector<FaultInfo> list_faults_by_device(const std::string& tenant_id, const std::string& device_id);
+    std::vector<FaultInfo> list_faults_by_device(const std::string& tenant_id,
+                                                   const std::string& device_id);
 
     // ======== Firmware CRUD ========
     StatusCode insert_firmware(const FirmwareVersion& fw);
@@ -99,10 +108,10 @@ public:
 private:
     StatusCode init_schema();
     StatusCode migrate_if_needed();
+    StatusCode create_tenants_table();
     StatusCode create_devices_table();
     StatusCode create_activation_tokens_table();
     StatusCode create_audit_log_table();
-    StatusCode create_tenants_table();
     StatusCode create_device_types_table();
     StatusCode create_device_models_table();
     StatusCode create_orders_table();
@@ -110,13 +119,14 @@ private:
     StatusCode create_faults_table();
     StatusCode create_firmwares_table();
 
-    Device device_from_row(const std::vector<std::string>& row) const;
-    DeviceTypeInfo  type_from_row(const std::vector<std::string>& row) const;
-    DeviceModelInfo model_from_row(const std::vector<std::string>& row) const;
-    Order  order_from_row(const std::vector<std::string>& row) const;
-    Recipe recipe_from_row(const std::vector<std::string>& row) const;
-    FaultInfo fault_from_row(const std::vector<std::string>& row) const;
-    FirmwareVersion firmware_from_row(const std::vector<std::string>& row) const;
+    // Row → struct converters
+    Device           device_from_row(const std::vector<std::string>& row) const;
+    DeviceTypeInfo   type_from_row(const std::vector<std::string>& row) const;
+    DeviceModelInfo  model_from_row(const std::vector<std::string>& row) const;
+    Order            order_from_row(const std::vector<std::string>& row) const;
+    Recipe           recipe_from_row(const std::vector<std::string>& row) const;
+    FaultInfo        fault_from_row(const std::vector<std::string>& row) const;
+    FirmwareVersion  firmware_from_row(const std::vector<std::string>& row) const;
 
     struct Impl;
     std::unique_ptr<Impl> impl_;

@@ -1,8 +1,10 @@
 #include "../../middleware/storage/database.h"
 #include "ota_manager.h"
+#include "../device/device_manager.h"
 #include <iostream>
 #include <algorithm>
 #include <sstream>
+#include <functional>
 
 namespace dev_sys {
 
@@ -92,9 +94,78 @@ StatusCode OtaManager::push_to_device(const std::string& tenant_id,
 StatusCode OtaManager::push_grayscale(const std::string& product_id,
                                        const std::string& target_version,
                                        int percent) {
-    // TODO: Query DeviceManager for all devices of this product
-    // TODO: Randomly select percent% of them
-    // TODO: Call push_to_device for each
+    if (percent < 1 || percent > 100) {
+        std::cerr << "[OtaMgr] Invalid grayscale percent: " << percent << std::endl;
+        return StatusCode::ERROR;
+    }
+
+    // Verify firmware version exists
+    auto fw_it = std::find_if(firmware_versions_.begin(), firmware_versions_.end(),
+        [&](const FirmwareVersion& fw) { return fw.version == target_version; });
+    if (fw_it == firmware_versions_.end()) {
+        std::cerr << "[OtaMgr] Firmware version not found: " << target_version << std::endl;
+        return StatusCode::ERROR;
+    }
+
+    // Collect candidate devices
+    std::vector<Device> candidates;
+
+    if (device_mgr_) {
+        // Query DeviceManager for all devices matching this product_id
+        auto all_devices = device_mgr_->list_all_devices();
+        for (const auto& dev : all_devices) {
+            if (dev.product_id == product_id && dev.activated &&
+                dev.status != DeviceStatus::OFFLINE &&
+                dev.status != DeviceStatus::FAULT &&
+                dev.firmware_version != target_version) {
+                candidates.push_back(dev);
+            }
+        }
+    } else {
+        // Fallback: iterate existing ota_records_ for devices we already know about
+        // (limited functionality without DeviceManager reference)
+        for (const auto& [device_id, rec] : ota_records_) {
+            // We only have device_id in records, need to infer product
+            // This is limited — prefer wiring device_mgr_ in main.cpp
+            if (rec.target_version != target_version && rec.stage == "done") {
+                Device dev;
+                dev.device_id = device_id;
+                dev.product_id = product_id;
+                dev.tenant_id = rec.tenant_id;
+                candidates.push_back(dev);
+            }
+        }
+    }
+
+    if (candidates.empty()) {
+        std::cout << "[OtaMgr] No eligible devices found for grayscale push"
+                  << " (product=" << product_id << ", version=" << target_version << ")"
+                  << std::endl;
+        return StatusCode::OK;
+    }
+
+    // Deterministic selection: hash device_id to decide if in grayscale group
+    // This ensures the same devices are selected on repeated calls
+    int selected_count = 0;
+    for (const auto& dev : candidates) {
+        // Simple hash-based selection: use std::hash of device_id
+        size_t hash_val = std::hash<std::string>{}(dev.device_id);
+        int bucket = static_cast<int>(hash_val % 100); // 0-99
+
+        if (bucket < percent) {
+            StatusCode sc = push_to_device(dev.tenant_id, product_id,
+                                           dev.device_id, target_version);
+            if (sc == StatusCode::OK) {
+                selected_count++;
+            }
+        }
+    }
+
+    std::cout << "[OtaMgr] Grayscale push: selected " << selected_count
+              << "/" << candidates.size() << " devices ("
+              << percent << "%, product=" << product_id
+              << ", version=" << target_version << ")" << std::endl;
+
     return StatusCode::OK;
 }
 

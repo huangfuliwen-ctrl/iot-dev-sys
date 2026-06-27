@@ -11,7 +11,7 @@ include(GoogleTest)
 add_executable(test_device_manager
     app/test_device_manager.cpp
 )
-target_link_libraries(test_device_manager PRIVATE dev_app_device GTest::gtest_main)
+target_link_libraries(test_device_manager PRIVATE dev_app_device dev_middleware_storage GTest::gtest_main)
 gtest_discover_tests(test_device_manager)
 
 add_executable(test_order_manager

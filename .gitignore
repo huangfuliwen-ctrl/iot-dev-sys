@@ -1,3 +1,4 @@
 build/
 cloud.db
 *.o
+logs/

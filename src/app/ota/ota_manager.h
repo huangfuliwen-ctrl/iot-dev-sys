@@ -74,11 +74,15 @@ public:
     void set_database(class Database* db) { db_ = db; }
     StatusCode load_from_database();
 
+    // Device manager reference for grayscale push (queries device list)
+    void set_device_manager(class DeviceManager* mgr) { device_mgr_ = mgr; }
+
     // Caller publishes via MessageRouter::send_ota_notify() → MQTT
 
 private:
     mutable std::mutex mutex_;
     Database* db_ = nullptr;
+    class DeviceManager* device_mgr_ = nullptr;
     std::vector<FirmwareVersion> firmware_versions_;
     std::unordered_map<std::string, OtaRecord> ota_records_; // key: device_id
 };
