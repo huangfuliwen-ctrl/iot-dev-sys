@@ -173,26 +173,87 @@ void MqttClient::on_message(const std::string& t, const std::string& p) {
 
 #else
 
+#include <sys/socket.h>
+#include <netdb.h>
+#include <unistd.h>
+#include <cstring>
+
 namespace dev_sys {
 
 struct MqttClient::Impl {
     std::string broker_uri, client_id;
+    std::string broker_host;
+    int broker_port = 1883;
     bool connected = false, reconnect_enabled = true;
     MqttMessageCallback msg_cb;
     std::string will_topic, will_payload;
     int will_qos = 1;
 };
 
+// Parse tcp://host:port URI
+static void parse_broker_uri(const std::string& uri, std::string& host, int& port) {
+    host = "127.0.0.1"; port = 1883;
+    std::string s = uri;
+    // Strip protocol prefix
+    if (s.find("tcp://") == 0) s = s.substr(6);
+    else if (s.find("ssl://") == 0) { s = s.substr(6); port = 8883; }
+    else if (s.find("mqtt://") == 0) s = s.substr(7);
+    // Extract host:port
+    auto pos = s.find(':');
+    if (pos != std::string::npos) {
+        host = s.substr(0, pos);
+        port = std::stoi(s.substr(pos + 1));
+    } else if (!s.empty()) {
+        host = s;
+    }
+}
+
+// Simple TCP health check — try to connect to broker
+static bool tcp_ping(const std::string& host, int port) {
+    int sock = socket(AF_INET, SOCK_STREAM, 0);
+    if (sock < 0) return false;
+
+    struct timeval tv;
+    tv.tv_sec = 2; tv.tv_usec = 0;
+    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+
+    struct hostent* he = gethostbyname(host.c_str());
+    if (!he) { close(sock); return false; }
+
+    struct sockaddr_in addr;
+    std::memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(port);
+    std::memcpy(&addr.sin_addr, he->h_addr_list[0], he->h_length);
+
+    int rc = ::connect(sock, (struct sockaddr*)&addr, sizeof(addr));
+    close(sock);
+    return rc == 0;
+}
+
 MqttClient::MqttClient() : impl_(std::make_unique<Impl>()) {}
 MqttClient::~MqttClient() {}
 StatusCode MqttClient::connect(const std::string& u, const std::string& c, const std::string&,
                                 const std::string&, const std::string&) {
-    impl_->broker_uri = u; impl_->client_id = c; impl_->connected = true;
-    std::cerr << "[MqttClient] WARNING: Built without Paho C++. MQTT is stubbed." << std::endl;
+    impl_->broker_uri = u; impl_->client_id = c;
+    parse_broker_uri(u, impl_->broker_host, impl_->broker_port);
+    impl_->connected = tcp_ping(impl_->broker_host, impl_->broker_port);
+    if (impl_->connected) {
+        std::cerr << "[MqttClient] TCP ping to " << impl_->broker_host << ":"
+                  << impl_->broker_port << " succeeded (stub mode)" << std::endl;
+    } else {
+        std::cerr << "[MqttClient] TCP ping to " << impl_->broker_host << ":"
+                  << impl_->broker_port << " failed — broker unreachable" << std::endl;
+    }
     return StatusCode::OK;
 }
 StatusCode MqttClient::disconnect() { impl_->connected = false; return StatusCode::OK; }
-bool MqttClient::is_connected() const { return impl_->connected; }
+bool MqttClient::is_connected() const {
+    // Re-ping on each check so status tracks broker up/down
+    impl_->connected = tcp_ping(impl_->broker_host, impl_->broker_port);
+    return impl_->connected;
+}
 StatusCode MqttClient::publish(const std::string&, const std::string&, int, bool) {
     return impl_->connected ? StatusCode::OK : StatusCode::COMM_DISCONNECTED;
 }

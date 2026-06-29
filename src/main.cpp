@@ -1572,8 +1572,12 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    *mqtt_connected = true;
-    log_mgr.info("main", "MQTT connected to " + svc_config.mqtt_broker_uri);
+    *mqtt_connected = mqtt.is_connected();
+    if (mqtt.is_connected()) {
+        log_mgr.info("main", "MQTT connected to " + svc_config.mqtt_broker_uri);
+    } else {
+        log_mgr.warn("main", "MQTT stub mode — broker not connected, running with simulated status");
+    }
 
     // 订阅所有设备上行topic（通配符）
     auto topics = MessageRouter::subscription_topics();
