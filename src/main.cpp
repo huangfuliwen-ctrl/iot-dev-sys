@@ -8,6 +8,8 @@
 #include <iomanip>
 #include <functional>
 #include <set>
+#include <cstring>
+#include <sys/stat.h>
 #include <filesystem>
 #include <vector>
 
@@ -127,8 +129,41 @@ int main(int argc, char* argv[]) {
     recipe_mgr.load_from_database();
     ota_mgr.set_database(&db);
     ota_mgr.load_from_database();
+    ota_mgr.seed_mock_data();
+    // Scan disk for firmware files not yet in memory (survives restart)
+    {
+        namespace fs = std::filesystem;
+        std::error_code ec;
+        if (fs::exists("./firmware_files", ec)) {
+            for (const auto& prod_entry : fs::directory_iterator("./firmware_files", ec)) {
+                if (!prod_entry.is_directory(ec)) continue;
+                std::string product = prod_entry.path().filename().string();
+                for (const auto& file_entry : fs::directory_iterator(prod_entry.path(), ec)) {
+                    if (!file_entry.is_regular_file(ec)) continue;
+                    std::string fname = file_entry.path().filename().string();
+                    auto sz = file_entry.file_size(ec);
+                    // Derive version from filename (strip extension)
+                    std::string ver = fname;
+                    size_t dot = ver.rfind('.');
+                    if (dot != std::string::npos) ver = ver.substr(0, dot);
+                    // Only register if not already present
+                    if (!ota_mgr.get_firmware(ver)) {
+                        FirmwareVersion fw;
+                        fw.version = ver; fw.product_id = product;
+                        fw.file_name = fname; fw.file_size = static_cast<int64_t>(sz);
+                        fw.download_url = "/api/v1/ota/firmwares/" + ver + "/download";
+                        fw.created_at = std::chrono::duration_cast<std::chrono::seconds>(
+                            std::chrono::system_clock::now().time_since_epoch()).count();
+                        ota_mgr.register_firmware(fw);
+                    }
+                }
+            }
+            std::cout << "[OtaMgr] Disk scan complete" << std::endl;
+        }
+    }
     fault_mgr.set_database(&db);
     fault_mgr.load_from_database();
+    fault_mgr.seed_mock_data();
 
     // ======== Phase 2.3: Organization & Account Management ========
     OrgManager org_mgr;
@@ -759,6 +794,8 @@ int main(int argc, char* argv[]) {
                      << R"("version":")" << fw.version << R"(",)";
                 json << R"("product_id":")" << fw.product_id << R"(",)";
                 json << R"("download_url":")" << fw.download_url << R"(",)";
+                json << R"("file_name":")" << fw.file_name << R"(",)";
+                json << R"("file_size":)" << fw.file_size << ",";
                 json << R"("checksum_sha256":")" << fw.checksum_sha256 << R"(",)";
                 json << R"("changelog":")" << fw.changelog << R"(",)";
                 json << R"("force_upgrade":)" << (fw.force_upgrade ? "true" : "false") << ",";
@@ -769,7 +806,7 @@ int main(int argc, char* argv[]) {
             return ApiServer::json_response(200, json.str());
         });
 
-    // Get single firmware
+    // Get single firmware metadata (MUST be before download route)
     api.get("/api/v1/ota/firmwares/{version}",
         [&ota_mgr](const HttpRequest& req) -> HttpResponse {
             std::string ver = req.path.substr(std::string("/api/v1/ota/firmwares/").size());
@@ -779,6 +816,8 @@ int main(int argc, char* argv[]) {
             json << R"({"code":0,"message":"success","data":{)";
             json << R"("version":")" << fw->version << R"(",)";
             json << R"("product_id":")" << fw->product_id << R"(",)";
+            json << R"("file_name":")" << fw->file_name << R"(",)";
+            json << R"("file_size":)" << fw->file_size << ",";
             json << R"("download_url":")" << fw->download_url << R"(",)";
             json << R"("checksum_sha256":")" << fw->checksum_sha256 << R"(",)";
             json << R"("changelog":")" << fw->changelog << R"(",)";
@@ -788,6 +827,28 @@ int main(int argc, char* argv[]) {
             return ApiServer::json_response(200, json.str());
         });
 
+    // Download firmware binary (registered AFTER detail route)
+    api.get("/api/v1/ota/firmwares/{version}/download",
+        [&ota_mgr](const HttpRequest& req) -> HttpResponse {
+            std::string rest = req.path.substr(std::string("/api/v1/ota/firmwares/").size());
+            std::string ver = rest.substr(0, rest.find("/download"));
+            auto fw_meta = ota_mgr.get_firmware(ver);
+            std::string filename = (fw_meta && !fw_meta->file_name.empty()) ? fw_meta->file_name : (ver + ".bin");
+            std::string product = (fw_meta && !fw_meta->product_id.empty()) ? fw_meta->product_id : "default";
+            std::string fpath = "./firmware_files/" + product + "/" + filename;
+            std::ifstream file(fpath, std::ios::binary | std::ios::ate);
+            if (!file.is_open()) return ApiServer::error_response(404, 1002, "Firmware file not found: " + ver);
+            int64_t sz = file.tellg(); file.seekg(0, std::ios::beg);
+            std::string fc(sz, '\0'); file.read(&fc[0], sz); file.close();
+            static const char* b64c = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+            std::string b64; int v = 0, vb = -6;
+            for (unsigned char c : fc) { v = (v << 8) + c; vb += 8; while (vb >= 0) { b64 += b64c[(v >> vb) & 0x3F]; vb -= 6; } }
+            if (vb > -6) b64 += b64c[((v << 8) >> (vb + 8)) & 0x3F];
+            while (b64.size() % 4) b64 += '=';
+            std::ostringstream j; j << R"({"code":0,"message":"success","data":{"version":")" << ver << R"(","file_name":")" << filename << R"(","file_size":)" << sz << R"(,"file_data":")" << b64 << R"("}})";
+            return ApiServer::json_response(200, j.str());
+        });
+
     // Register firmware
     api.post("/api/v1/ota/firmwares",
         [&ota_mgr](const HttpRequest& req) -> HttpResponse {
@@ -795,12 +856,38 @@ int main(int argc, char* argv[]) {
             fw.version         = JsonHelper::get_string(req.body, "version");
             fw.product_id      = JsonHelper::get_string(req.body, "product_id");
             fw.download_url    = JsonHelper::get_string(req.body, "download_url");
+            fw.file_name       = JsonHelper::get_string(req.body, "file_name");
+            fw.file_size       = JsonHelper::get_int(req.body, "file_size", 0);
             fw.checksum_sha256 = JsonHelper::get_string(req.body, "checksum_sha256");
             fw.changelog       = JsonHelper::get_string(req.body, "changelog");
             fw.force_upgrade   = JsonHelper::get_bool(req.body, "force_upgrade", false);
             fw.created_at      = JsonHelper::get_int(req.body, "created_at", 0);
-            if (fw.version.empty() || fw.download_url.empty()) {
-                return ApiServer::error_response(400, 1001, "version and download_url are required");
+            if (fw.created_at == 0) {
+                fw.created_at = std::chrono::duration_cast<std::chrono::seconds>(
+                    std::chrono::system_clock::now().time_since_epoch()).count();
+            }
+            if (fw.version.empty()) {
+                return ApiServer::error_response(400, 1001, "version is required");
+            }
+            if (fw.download_url.empty()) {
+                fw.download_url = "/api/v1/ota/firmwares/" + fw.version + "/download";
+            }
+            // Save firmware binary to disk if provided
+            std::string file_data = JsonHelper::get_string(req.body, "file_data");
+            if (!file_data.empty()) {
+                // Use original filename, organized under product directory
+                std::string filename = fw.file_name.empty() ? (fw.version + ".bin") : fw.file_name;
+                std::string product = fw.product_id.empty() ? "default" : fw.product_id;
+                std::string dir = "./firmware_files/" + product;
+                mkdir("./firmware_files", 0755);
+                mkdir(dir.c_str(), 0755);
+                std::string fpath = dir + "/" + filename;
+                std::string decoded;
+                static const char* b64 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+                int val = 0, valb = -8;
+                for (char c : file_data) { if (c == '=') break; const char* p = strchr(b64, c); if (!p) continue; val = (val << 6) + (p - b64); valb += 6; if (valb >= 0) { decoded += char((val >> valb) & 0xFF); valb -= 8; } }
+                std::ofstream out(fpath, std::ios::binary); out.write(decoded.data(), decoded.size()); out.close();
+                if (fw.file_size == 0) fw.file_size = decoded.size();
             }
             StatusCode sc = ota_mgr.register_firmware(fw);
             if (sc != StatusCode::OK)
@@ -938,20 +1025,16 @@ int main(int argc, char* argv[]) {
     api.del("/api/v1/ota/firmwares/{version}",
         [&ota_mgr](const HttpRequest& req) -> HttpResponse {
             std::string ver = req.path.substr(std::string("/api/v1/ota/firmwares/").size());
-            // Find firmware to get product_id for file path
             auto fw = ota_mgr.get_firmware(ver);
             StatusCode sc = ota_mgr.delete_firmware(ver);
             if (sc != StatusCode::OK)
                 return ApiServer::error_response(400, static_cast<int>(sc), status_message(sc));
-            // Remove from disk — try both old and new path formats
-            std::error_code ec;
-            std::filesystem::remove("./firmware/" + ver + ".bin", ec);
-            if (fw) {
-                std::string dl = fw->download_url;
-                // Extract product_id/filename from download_url
-                size_t p = dl.find("/download/");
-                if (p != std::string::npos)
-                    std::filesystem::remove("./firmware/" + dl.substr(p + 10), ec);
+            // Remove file from disk
+            if (fw && !fw->file_name.empty()) {
+                std::error_code ec;
+                std::string product = fw->product_id.empty() ? "default" : fw->product_id;
+                std::string fpath = "./firmware_files/" + product + "/" + fw->file_name;
+                std::filesystem::remove(fpath, ec);
             }
             return ApiServer::json_response(200,
                 R"({"code":0,"message":"success","data":{"version":")" + ver + R"(","deleted":true}})");

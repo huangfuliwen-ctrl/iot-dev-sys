@@ -398,6 +398,8 @@ struct FirmwareVersion {
     std::string version;
     std::string product_id;
     std::string download_url;
+    std::string file_name;
+    int64_t     file_size = 0;
     std::string checksum_sha256;
     std::string changelog;
     bool        force_upgrade = false;

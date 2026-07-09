@@ -220,7 +220,7 @@ inline bool get_bool(const std::string& json, const std::string& key, bool def =
 class DeviceSimulator {
 public:
     struct Config {
-        std::string cloud_url    = "http://127.0.0.1:8080";
+        std::string cloud_url    = "http://127.0.0.1:9080";
         std::string tenant_id    = "tenant_demo";
         std::string hardware_uid = "";
         std::string model        = "CM-2000";
