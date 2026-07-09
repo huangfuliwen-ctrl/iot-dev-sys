@@ -129,7 +129,7 @@ int main(int argc, char* argv[]) {
     recipe_mgr.load_from_database();
     ota_mgr.set_database(&db);
     ota_mgr.load_from_database();
-    ota_mgr.seed_mock_data();
+    // Scan disk FIRST — so seed_mock_data skips if files already exist
     // Scan disk for firmware files not yet in memory (survives restart)
     {
         namespace fs = std::filesystem;
@@ -161,6 +161,8 @@ int main(int argc, char* argv[]) {
             std::cout << "[OtaMgr] Disk scan complete" << std::endl;
         }
     }
+    // Seed mock data ONLY if still empty after disk scan
+    ota_mgr.seed_mock_data();
     fault_mgr.set_database(&db);
     fault_mgr.load_from_database();
     fault_mgr.seed_mock_data();

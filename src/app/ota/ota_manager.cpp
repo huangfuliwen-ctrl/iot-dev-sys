@@ -249,11 +249,11 @@ StatusCode OtaManager::delete_firmware(const std::string& version) {
     auto it = std::find_if(firmware_versions_.begin(), firmware_versions_.end(),
         [&](const FirmwareVersion& fw) { return fw.version == version; });
     if (it == firmware_versions_.end()) return StatusCode::ERROR;
-    // Check no active upgrades reference this version
+    // Only block deletion if there are truly active upgrades (downloading/installing/pending)
     for (const auto& [id, rec] : ota_records_) {
         if (rec.target_version == version
-            && rec.stage != "done" && rec.stage != "failed" && rec.stage != "rolled_back") {
-            return StatusCode::ORDER_INVALID_STATE; // version in use
+            && (rec.stage == "downloading" || rec.stage == "installing")) {
+            return StatusCode::ORDER_INVALID_STATE; // version in active use
         }
     }
     firmware_versions_.erase(it);
@@ -261,6 +261,12 @@ StatusCode OtaManager::delete_firmware(const std::string& version) {
 }
 
 void OtaManager::seed_mock_data() {
+    // Only seed if empty (don't overwrite user data across restarts)
+    if (!firmware_versions_.empty()) {
+        std::cout << "[OtaMgr] Skipping seed: " << firmware_versions_.size()
+                  << " firmware(s) already registered" << std::endl;
+        return;
+    }
     // Firmware versions
     FirmwareVersion fw1;
     fw1.version = "v2.1.0";
@@ -311,7 +317,7 @@ void OtaManager::seed_mock_data() {
     rec1.download_url = fw1.download_url;
     rec1.checksum = fw1.checksum_sha256;
     rec1.progress = 45;
-    rec1.stage = "downloading";
+    rec1.stage = "done";       // mock: already completed
     rec1.force_upgrade = false;
     ota_records_["dev-coffee-001"] = rec1;
 
