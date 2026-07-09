@@ -20,6 +20,7 @@ namespace dev_sys {
 struct HttpRequest {
     std::string method;
     std::string path;
+    std::string query;
     std::string body;
     std::unordered_map<std::string, std::string> headers;
     std::string remote_ip;
@@ -29,6 +30,7 @@ struct HttpResponse {
     int         status_code = 200;
     std::string content_type = "application/json";
     std::string body;
+    std::string extra_headers;  // appended after Content-* headers (CORS, etc.)
 };
 
 using RouteHandler = std::function<HttpResponse(const HttpRequest&)>;
@@ -63,7 +65,7 @@ public:
 private:
     void accept_loop();
     void handle_connection(int client_fd);
-    HttpRequest parse_request(const std::string& raw) const;
+    HttpRequest parse_request(const std::string& raw, size_t content_len = 0) const;
     std::string build_response(const HttpResponse& resp) const;
 
     struct Impl;

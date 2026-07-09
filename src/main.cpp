@@ -4,8 +4,16 @@
 #include <thread>
 #include <chrono>
 #include <sstream>
+#include <fstream>
+#include <iomanip>
 #include <functional>
 #include <set>
+#include <filesystem>
+#include <vector>
+
+#ifdef HAS_OPENSSL
+#include <openssl/sha.h>
+#endif
 
 // App layer
 #include "app/message_router.h"
@@ -79,6 +87,7 @@ int main(int argc, char* argv[]) {
     // ======== Phase 1: Infrastructure ========
     LogManager log_mgr;
     log_mgr.init("./logs", LogManager::Level::INFO);
+    std::filesystem::create_directories("./firmware");
 
     Database db;
     // PostgreSQL connection string (libpq format)
@@ -800,13 +809,150 @@ int main(int argc, char* argv[]) {
                 R"({"code":0,"message":"success","data":{"version":")" + fw.version + R"("}})");
         });
 
-    // Delete firmware
+    // Firmware binary upload — saves with original filename, organized by product
+    // POST /api/v1/ota/firmwares/upload?version=X&product_id=Y&filename=Z
+    api.post("/api/v1/ota/firmwares/upload",
+        [&ota_mgr](const HttpRequest& req) -> HttpResponse {
+            auto qp = [&req](const std::string& k) -> std::string {
+                std::string s = k + "=";
+                size_t p = req.query.find(s);
+                if (p == std::string::npos) return "";
+                p += s.size();
+                size_t e = req.query.find('&', p);
+                if (e == std::string::npos) e = req.query.size();
+                return req.query.substr(p, e - p);
+            };
+            std::string version  = qp("version"),  product_id = qp("product_id"),
+                        filename = qp("filename"), changelog  = qp("changelog");
+            bool force = (qp("force_upgrade") == "1" || qp("force_upgrade") == "true");
+
+            if (version.empty() || product_id.empty())
+                return ApiServer::error_response(400, 1001, "version and product_id required");
+            if (filename.empty()) filename = version + ".bin";
+
+            // Ensure product directory exists
+            std::string fw_dir = "./firmware/" + product_id;
+            std::error_code ec;
+            std::filesystem::create_directories(fw_dir, ec);
+
+            // Save with original filename under product directory
+            std::string fw_path = fw_dir + "/" + filename;
+            std::ofstream out(fw_path, std::ios::binary);
+            if (!out.is_open())
+                return ApiServer::error_response(500, 2000, "Cannot write firmware file");
+            out.write(req.body.data(), req.body.size());
+            out.close();
+
+            // SHA256 checksum
+            std::string checksum;
+#ifdef HAS_OPENSSL
+            unsigned char hash[SHA256_DIGEST_LENGTH];
+            SHA256(reinterpret_cast<const unsigned char*>(req.body.data()), req.body.size(), hash);
+            std::ostringstream hex;
+            for (int i = 0; i < SHA256_DIGEST_LENGTH; i++)
+                hex << std::hex << std::setfill('0') << std::setw(2) << (int)hash[i];
+            checksum = hex.str();
+#else
+            checksum = "size:" + std::to_string(req.body.size());
+#endif
+            // Build download URL
+            std::string host = "127.0.0.1:9080";
+            auto hit = req.headers.find("Host");
+            if (hit != req.headers.end()) host = hit->second;
+            std::string dl_url = "http://" + host + "/api/v1/ota/firmwares/download/"
+                               + product_id + "/" + filename;
+
+            FirmwareVersion fw;
+            fw.version = version; fw.product_id = product_id;
+            fw.download_url = dl_url; fw.checksum_sha256 = checksum;
+            fw.changelog = changelog; fw.force_upgrade = force;
+            fw.created_at = std::chrono::duration_cast<std::chrono::seconds>(
+                std::chrono::system_clock::now().time_since_epoch()).count();
+            StatusCode sc = ota_mgr.register_firmware(fw);
+            if (sc != StatusCode::OK)
+                return ApiServer::error_response(400, static_cast<int>(sc), status_message(sc));
+
+            std::ostringstream json;
+            json << R"({"code":0,"message":"success","data":{)";
+            json << R"("version":")" << version << R"(",)";
+            json << R"("filename":")" << filename << R"(",)";
+            json << R"("product_id":")" << product_id << R"(",)";
+            json << R"("size":)" << req.body.size() << ",";
+            json << R"("checksum_sha256":")" << checksum << R"(",)";
+            json << R"("download_url":")" << dl_url << R"(")";
+            json << "}}";
+            return ApiServer::json_response(201, json.str());
+        });
+
+    // Firmware binary download with Range support
+    // GET /api/v1/ota/firmwares/download/{product_id}/{filename}
+    api.get("/api/v1/ota/firmwares/download/{product_id}/{filename}",
+        [](const HttpRequest& req) -> HttpResponse {
+            std::string rest = req.path.substr(
+                std::string("/api/v1/ota/firmwares/download/").size());
+            size_t slash = rest.find('/');
+            if (slash == std::string::npos)
+                return ApiServer::error_response(404, 1002, "Invalid path");
+            std::string product_id = rest.substr(0, slash);
+            std::string filename   = rest.substr(slash + 1);
+
+            std::string fw_path = "./firmware/" + product_id + "/" + filename;
+
+            std::error_code ec;
+            if (!std::filesystem::exists(fw_path, ec))
+                return ApiServer::error_response(404, 1002,
+                    "Firmware not found: " + product_id + "/" + filename);
+            int64_t fsize = std::filesystem::file_size(fw_path, ec);
+
+            std::ifstream in(fw_path, std::ios::binary);
+            if (!in.is_open())
+                return ApiServer::error_response(500, 2000, "Cannot read firmware");
+
+            int64_t off = 0, end = fsize - 1;
+            bool partial = false;
+            auto it = req.headers.find("Range");
+            if (it != req.headers.end() && it->second.find("bytes=") == 0) {
+                std::string v = it->second.substr(6);
+                size_t d = v.find('-');
+                if (d != std::string::npos) {
+                    off = std::stoll(v.substr(0, d));
+                    std::string es = v.substr(d + 1);
+                    end = es.empty() ? fsize - 1 : std::stoll(es);
+                    partial = true;
+                }
+            }
+
+            int64_t len = end - off + 1;
+            in.seekg(off);
+            std::string data(len, '\0');
+            in.read(&data[0], len);
+
+            HttpResponse resp;
+            resp.status_code = partial ? 206 : 200;
+            resp.content_type = "application/octet-stream";
+            resp.body = std::move(data);
+            return resp;
+        });
+
+    // Delete firmware (also remove file from disk)
     api.del("/api/v1/ota/firmwares/{version}",
         [&ota_mgr](const HttpRequest& req) -> HttpResponse {
             std::string ver = req.path.substr(std::string("/api/v1/ota/firmwares/").size());
+            // Find firmware to get product_id for file path
+            auto fw = ota_mgr.get_firmware(ver);
             StatusCode sc = ota_mgr.delete_firmware(ver);
             if (sc != StatusCode::OK)
                 return ApiServer::error_response(400, static_cast<int>(sc), status_message(sc));
+            // Remove from disk — try both old and new path formats
+            std::error_code ec;
+            std::filesystem::remove("./firmware/" + ver + ".bin", ec);
+            if (fw) {
+                std::string dl = fw->download_url;
+                // Extract product_id/filename from download_url
+                size_t p = dl.find("/download/");
+                if (p != std::string::npos)
+                    std::filesystem::remove("./firmware/" + dl.substr(p + 10), ec);
+            }
             return ApiServer::json_response(200,
                 R"({"code":0,"message":"success","data":{"version":")" + ver + R"(","deleted":true}})");
         });
@@ -1568,8 +1714,10 @@ int main(int argc, char* argv[]) {
                       "/etc/dev-sys-cloud/certs/ca.pem",
                       "/etc/dev-sys-cloud/certs/client.pem",
                       "/etc/dev-sys-cloud/certs/client_key.pem") != StatusCode::OK) {
-        std::cerr << "[Main] MQTT connection failed, exiting" << std::endl;
-        return 1;
+        std::cerr << "[Main] MQTT connection failed — HTTP API still available" << std::endl;
+        *mqtt_connected = false;
+    } else {
+        *mqtt_connected = true;
     }
 
     *mqtt_connected = mqtt.is_connected();
