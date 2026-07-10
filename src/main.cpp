@@ -12,6 +12,7 @@
 #include <sys/stat.h>
 #include <filesystem>
 #include <vector>
+#include <regex>
 
 #ifdef HAS_OPENSSL
 #include <openssl/sha.h>
@@ -851,6 +852,113 @@ int main(int argc, char* argv[]) {
                 json << items[i];
             }
             json << "]}}";
+            return ApiServer::json_response(200, json.str());
+        });
+
+    // Get latest firmware version for a product
+    // GET /api/v1/ota/firmwares/latest?product_id=coffee_v1
+    // Returns highest semantic version (e.g., v2.1.0 > v1.5.0).
+    // Falls back to newest file by mtime if version can't be parsed.
+    api.get("/api/v1/ota/firmwares/latest",
+        [](const HttpRequest& req) -> HttpResponse {
+            auto qp = [&req](const std::string& k) -> std::string {
+                std::string s = k + "=";
+                size_t p = req.query.find(s);
+                if (p == std::string::npos) return "";
+                p += s.size();
+                size_t e = req.query.find('&', p);
+                if (e == std::string::npos) e = req.query.size();
+                return req.query.substr(p, e - p);
+            };
+            std::string product_id = qp("product_id");
+            if (product_id.empty())
+                return ApiServer::error_response(400, 1001, "product_id required");
+
+            std::string fw_dir = "./firmware/" + product_id;
+            std::error_code ec;
+            if (!std::filesystem::exists(fw_dir, ec))
+                return ApiServer::error_response(404, 1002, "No firmware for product: " + product_id);
+
+            // Parse semantic version from filename: extracts X.Y.Z
+            // Matches patterns like "v2.1.0", "firmware_1.5.3", "2.0.0-beta"
+            auto parse_version = [](const std::string& fname) -> std::tuple<int,int,int> {
+                std::regex re(R"((\d+)\.(\d+)\.(\d+))");
+                std::smatch m;
+                if (std::regex_search(fname, m, re) && m.size() >= 4)
+                    return {std::stoi(m[1]), std::stoi(m[2]), std::stoi(m[3])};
+                return {0, 0, 0}; // unparseable — fallback to mtime
+            };
+
+            std::string best_file, best_path;
+            time_t best_mtime = 0;
+            int best_major = -1, best_minor = 0, best_patch = 0;
+            int64_t best_size = 0;
+
+            for (const auto& entry : std::filesystem::directory_iterator(fw_dir, ec)) {
+                if (!entry.is_regular_file(ec)) continue;
+                std::string fname = entry.path().filename().string();
+                std::string fpath = entry.path().string();
+                struct stat st;
+                if (::stat(fpath.c_str(), &st) != 0) continue;
+
+                auto [maj, min, pat] = parse_version(fname);
+                bool is_newer = false;
+                if (maj > 0 || min > 0 || pat > 0) {
+                    // Versioned file: compare by semver, tie-break by mtime
+                    if (maj > best_major) is_newer = true;
+                    else if (maj == best_major && min > best_minor) is_newer = true;
+                    else if (maj == best_major && min == best_minor && pat > best_patch) is_newer = true;
+                    else if (maj == best_major && min == best_minor && pat == best_patch
+                             && st.st_mtime > best_mtime) is_newer = true;
+                } else if (best_major < 1) {
+                    // Both unversioned: compare by mtime only
+                    if (st.st_mtime > best_mtime) is_newer = true;
+                }
+                // If current is unversioned but best is versioned, skip
+
+                if (is_newer) {
+                    best_major = maj; best_minor = min; best_patch = pat;
+                    best_mtime = st.st_mtime;
+                    best_file = fname; best_path = fpath; best_size = st.st_size;
+                }
+            }
+            if (best_file.empty())
+                return ApiServer::error_response(404, 1002, "No firmware for product: " + product_id);
+
+            // SHA256
+            std::string checksum;
+#ifdef HAS_OPENSSL
+            std::ifstream fin(best_path, std::ios::binary);
+            SHA256_CTX ctx; SHA256_Init(&ctx);
+            char buf[65536];
+            while (fin.read(buf, sizeof(buf)) || fin.gcount() > 0)
+                SHA256_Update(&ctx, buf, fin.gcount());
+            unsigned char hash[SHA256_DIGEST_LENGTH];
+            SHA256_Final(hash, &ctx);
+            std::ostringstream hex;
+            for (int i = 0; i < SHA256_DIGEST_LENGTH; i++)
+                hex << std::hex << std::setfill('0') << std::setw(2) << (int)hash[i];
+            checksum = hex.str();
+#else
+            checksum = "size:" + std::to_string(best_size);
+#endif
+            std::ostringstream ts;
+            ts << std::put_time(std::gmtime(&best_mtime), "%Y-%m-%dT%H:%M:%SZ");
+
+            std::ostringstream json;
+            json << R"({"code":0,"message":"success","data":{)";
+            json << R"("version":")" << best_file << R"(",)";
+            json << R"("product_id":")" << product_id << R"(",)";
+            json << R"("file_name":")" << best_file << R"(",)";
+            json << R"("file_size":)" << best_size << ",";
+            json << R"("version_major":)" << best_major << ",";
+            json << R"("version_minor":)" << best_minor << ",";
+            json << R"("version_patch":)" << best_patch << ",";
+            json << R"("created_at":")" << ts.str() << R"(",)";
+            json << R"("download_url":"http://127.0.0.1:9080/api/v1/ota/firmwares/download/)"
+                 << product_id << "/" << best_file << R"(",)";
+            json << R"("checksum_sha256":")" << checksum << R"(")";
+            json << "}}";
             return ApiServer::json_response(200, json.str());
         });
 
