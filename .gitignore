@@ -4,3 +4,4 @@ cloud.db
 logs/
 firmware_files/
 firmware/
+device_creds.json
