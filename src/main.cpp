@@ -350,17 +350,9 @@ int main(int argc, char* argv[]) {
                        << "') ON CONFLICT (tenant_id) DO NOTHING";
             db.execute(ensure_sql.str());
 
-            // Update device tenant in DeviceManager (in-memory)
-            bool found = false;
-            for (const auto& dev : device_mgr.list_all_devices()) {
-                if (dev.device_id == device_id) {
-                    device_mgr.update_device_status(new_tenant, device_id,
-                                                     dev.status);
-                    found = true;
-                    break;
-                }
-            }
-            if (!found)
+            // Migrate device to new tenant in DeviceManager (in-memory)
+            StatusCode mg_sc = device_mgr.migrate_device(device_id, new_tenant);
+            if (mg_sc != StatusCode::OK)
                 return ApiServer::error_response(404, 1002, "Device not found: " + device_id);
 
             // Update in database

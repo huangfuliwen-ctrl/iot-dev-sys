@@ -43,6 +43,8 @@ public:
     StatusCode update_device_status(const std::string& tenant_id,
                                      const std::string& device_id,
                                      DeviceStatus status);
+    StatusCode migrate_device(const std::string& device_id,
+                               const std::string& new_tenant);
 
     // ======== Query ========
     std::optional<Device> get_device(const std::string& tenant_id,

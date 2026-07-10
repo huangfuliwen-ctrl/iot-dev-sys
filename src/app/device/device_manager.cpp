@@ -89,6 +89,23 @@ StatusCode DeviceManager::update_device_status(const std::string& tenant_id,
     return StatusCode::OK;
 }
 
+StatusCode DeviceManager::migrate_device(const std::string& device_id,
+                                          const std::string& new_tenant) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    // Find device across all tenants
+    for (auto& [tid, td] : tenants_) {
+        auto it = td.map.find(device_id);
+        if (it != td.map.end()) {
+            Device dev = it->second;           // copy device
+            td.map.erase(it);                  // remove from old tenant
+            dev.tenant_id = new_tenant;         // update tenant_id
+            tenants_[new_tenant].map[device_id] = dev;  // insert into new tenant
+            return StatusCode::OK;
+        }
+    }
+    return StatusCode::DEV_NOT_ACTIVATED;
+}
+
 // ============================================================
 // Query
 // ============================================================
