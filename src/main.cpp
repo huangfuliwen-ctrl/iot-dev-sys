@@ -203,30 +203,27 @@ int main(int argc, char* argv[]) {
     api.post("/api/v1/device/activate",
         [&activation, &device_mgr](const HttpRequest& req) -> HttpResponse {
             ActivationRequest act_req;
-            act_req.hardware_uid    = JsonHelper::get_string(req.body, "hardware_uid");
-            act_req.model           = JsonHelper::get_string(req.body, "model");
-            act_req.firmware_version= JsonHelper::get_string(req.body, "firmware_version");
-            act_req.mac_address     = JsonHelper::get_string(req.body, "mac_address");
-            act_req.tenant_id       = JsonHelper::get_string(req.body, "tenant_id");
-            if (act_req.tenant_id.empty()) act_req.tenant_id = "default";
-            act_req.device_type = static_cast<DeviceType>(
-                JsonHelper::get_int(req.body, "device_type", 4));
-
+            act_req.uid      = JsonHelper::get_string(req.body, "uid");
+            act_req.model_key = JsonHelper::get_string(req.body, "model_key");
             std::string remote_ip = req.remote_ip.empty() ? "127.0.0.1" : req.remote_ip;
 
             ActivationResponse resp = activation.process_activation(act_req, remote_ip);
 
-            // Register with DeviceManager so it appears in device lists
             if (resp.success) {
                 Device dev;
                 dev.device_id    = resp.device_id;
                 dev.tenant_id    = resp.tenant_id;
                 dev.product_id   = resp.product_id;
-                dev.type         = act_req.device_type;
-                dev.model        = act_req.model;
-                dev.hardware_uid = act_req.hardware_uid;
-                dev.mac_address  = act_req.mac_address;
-                dev.firmware_version = act_req.firmware_version;
+                dev.type         = DeviceType::OTHER;
+
+                // Resolve internal_type from device_type string
+                if (resp.device_type == "coffee_machine")  dev.type = DeviceType::COFFEE_MACHINE;
+                else if (resp.device_type == "instant_machine") dev.type = DeviceType::INSTANT_MACHINE;
+                else if (resp.device_type == "water_dispenser") dev.type = DeviceType::WATER_DISPENSER;
+
+                dev.model        = resp.model_code;
+                dev.hardware_uid = act_req.uid;
+                dev.firmware_version = resp.firmware_version;
                 dev.status       = DeviceStatus::OFFLINE;
                 dev.activated    = true;
                 dev.last_heartbeat_at = 0;
@@ -235,24 +232,24 @@ int main(int argc, char* argv[]) {
                 device_mgr.register_device(dev);
             }
 
-            // Build JSON response
             std::ostringstream json;
             json << "{"
                  << "\"success\":" << (resp.success ? "true" : "false") << ","
                  << "\"device_id\":\"" << resp.device_id << "\","
+                 << "\"model_key\":\"" << resp.model_key << "\","
+                 << "\"model_code\":\"" << resp.model_code << "\","
                  << "\"tenant_id\":\"" << resp.tenant_id << "\","
                  << "\"product_id\":\"" << resp.product_id << "\","
+                 << "\"device_type\":\"" << resp.device_type << "\","
+                 << "\"firmware_version\":\"" << resp.firmware_version << "\","
                  << "\"activation_token\":\"" << resp.activation_token << "\","
                  << "\"mqtt_broker_uri\":\"" << resp.mqtt_broker_uri << "\","
                  << "\"ttl_seconds\":" << resp.ttl_seconds;
-            if (!resp.error_message.empty()) {
+            if (!resp.error_message.empty())
                 json << ",\"error_code\":" << resp.error_code
                      << ",\"error_message\":\"" << resp.error_message << "\"";
-            }
             json << "}";
-
-            int http_status = resp.success ? 201 : 400;
-            return ApiServer::json_response(http_status, json.str());
+            return ApiServer::json_response(resp.success ? 201 : 400, json.str());
         });
 
     // Device status query (supports org_scope filtering via Bearer token)
@@ -291,6 +288,94 @@ int main(int argc, char* argv[]) {
                      << "}";
             }
             json << "]}";
+            return ApiServer::json_response(200, json.str());
+        });
+
+    // List all devices with full detail (admin panel)
+    api.get("/api/v1/devices",
+        [&device_mgr, &acct_mgr, &org_mgr, &db](const HttpRequest& req) -> HttpResponse {
+            auto devices = device_mgr.list_all_devices();
+            auto tp = extract_auth(req, acct_mgr);
+            if (tp && tp->role_code != "super_admin") {
+                std::set<std::string> vt;
+                for (int32_t oid : tp->org_scope) {
+                    auto o = org_mgr.get_org(oid);
+                    if (o) vt.insert(o->tenant_id);
+                }
+                devices.erase(std::remove_if(devices.begin(), devices.end(),
+                    [&vt](const Device& d) { return !vt.count(d.tenant_id); }),
+                    devices.end());
+            }
+            std::ostringstream json;
+            json << "{\"code\":0,\"message\":\"success\",\"data\":{\"total\":" << devices.size()
+                 << ",\"devices\":[";
+            for (size_t i = 0; i < devices.size(); i++) {
+                if (i > 0) json << ",";
+                const auto& d = devices[i];
+                json << "{"
+                     << R"("device_id":")" << d.device_id << R"(",)";
+                json << R"("tenant_id":")" << d.tenant_id << R"(",)";
+                json << R"("product_id":")" << d.product_id << R"(",)";
+                json << R"("model":")" << d.model << R"(",)";
+                json << R"("hardware_uid":")" << d.hardware_uid << R"(",)";
+                json << R"("firmware_version":")" << d.firmware_version << R"(",)";
+                json << R"("type":)" << static_cast<int>(d.type) << ",";
+                json << R"("status":)" << static_cast<int>(d.status) << ",";
+                json << R"("activated":)" << (d.activated ? "true" : "false") << ",";
+                json << R"("last_heartbeat_at":)" << d.last_heartbeat_at << ",";
+                json << R"("activated_at":)" << d.activated_at;
+                json << "}";
+            }
+            json << "]}}";
+            return ApiServer::json_response(200, json.str());
+        });
+
+    // Migrate device to a different tenant (admin operation)
+    api.put("/api/v1/devices/{device_id}/tenant",
+        [&device_mgr, &db](const HttpRequest& req) -> HttpResponse {
+            std::string device_id = req.path.substr(
+                std::string("/api/v1/devices/").size());
+            size_t slash = device_id.rfind("/tenant");
+            if (slash == std::string::npos)
+                return ApiServer::error_response(404, 1002, "Not found");
+            device_id = device_id.substr(0, slash);
+            std::string new_tenant = JsonHelper::get_string(req.body, "tenant_id");
+            if (new_tenant.empty())
+                return ApiServer::error_response(400, 1001, "tenant_id is required");
+
+            // Ensure tenant exists in DB
+            std::ostringstream ensure_sql;
+            ensure_sql << "INSERT INTO tenants (tenant_id, name) VALUES ('"
+                       << new_tenant << "','" << new_tenant
+                       << "') ON CONFLICT (tenant_id) DO NOTHING";
+            db.execute(ensure_sql.str());
+
+            // Update device tenant in DeviceManager (in-memory)
+            bool found = false;
+            for (const auto& dev : device_mgr.list_all_devices()) {
+                if (dev.device_id == device_id) {
+                    device_mgr.update_device_status(new_tenant, device_id,
+                                                     dev.status);
+                    found = true;
+                    break;
+                }
+            }
+            if (!found)
+                return ApiServer::error_response(404, 1002, "Device not found: " + device_id);
+
+            // Update in database
+            std::ostringstream sql;
+            sql << "UPDATE devices SET tenant_id='" << new_tenant
+                << "', updated_at=EXTRACT(EPOCH FROM NOW())::BIGINT "
+                << "WHERE device_id='" << device_id << "'";
+            StatusCode sc = db.execute(sql.str());
+            if (sc != StatusCode::OK)
+                return ApiServer::error_response(500, 2000, "Database update failed");
+
+            std::ostringstream json;
+            json << R"({"code":0,"message":"success","data":{)";
+            json << R"("device_id":")" << device_id << R"(",)";
+            json << R"("tenant_id":")" << new_tenant << R"("}})";
             return ApiServer::json_response(200, json.str());
         });
 
@@ -414,6 +499,7 @@ int main(int argc, char* argv[]) {
                 const auto& m = models[i];
                 json << "{\"id\":" << m.id
                      << ",\"model_code\":\"" << m.model_code << "\""
+                     << ",\"model_key\":\"" << m.model_key << "\""
                      << ",\"type_code\":\"" << m.type_code << "\""
                      << ",\"display_name\":\"" << m.display_name << "\""
                      << ",\"description\":\"" << m.description << "\""
@@ -437,6 +523,7 @@ int main(int argc, char* argv[]) {
             std::ostringstream json;
             json << "{\"id\":" << m->id
                  << ",\"model_code\":\"" << m->model_code << "\""
+                 << ",\"model_key\":\"" << m->model_key << "\""
                  << ",\"type_code\":\"" << m->type_code << "\""
                  << ",\"display_name\":\"" << m->display_name << "\""
                  << ",\"description\":\"" << m->description << "\""
@@ -453,6 +540,9 @@ int main(int argc, char* argv[]) {
         [&type_mgr](const HttpRequest& req) -> HttpResponse {
             DeviceModelInfo info;
             info.model_code    = JsonHelper::get_string(req.body, "model_code");
+            info.model_key     = JsonHelper::get_string(req.body, "model_key");
+            // Auto-generate ULID if model_key not provided
+            if (info.model_key.empty()) info.model_key = UlidGenerator::generate();
             info.type_code     = JsonHelper::get_string(req.body, "type_code");
             info.display_name  = JsonHelper::get_string(req.body, "display_name");
             info.description   = JsonHelper::get_string(req.body, "description");
@@ -468,7 +558,8 @@ int main(int argc, char* argv[]) {
                 return ApiServer::error_response(400, static_cast<int>(sc), status_message(sc));
 
             return ApiServer::json_response(201,
-                "{\"success\":true,\"model_code\":\"" + info.model_code + "\"}");
+                "{\"success\":true,\"model_code\":\"" + info.model_code
+                + "\",\"model_key\":\"" + info.model_key + "\"}");
         });
 
     // Update model
@@ -480,6 +571,7 @@ int main(int argc, char* argv[]) {
 
             DeviceModelInfo info;
             info.model_code    = code;
+            info.model_key     = JsonHelper::get_string(req.body, "model_key");
             info.type_code     = JsonHelper::get_string(req.body, "type_code");
             info.display_name  = JsonHelper::get_string(req.body, "display_name");
             info.description   = JsonHelper::get_string(req.body, "description");
@@ -493,7 +585,8 @@ int main(int argc, char* argv[]) {
                 return ApiServer::error_response(400, static_cast<int>(sc), status_message(sc));
 
             return ApiServer::json_response(200,
-                "{\"success\":true,\"model_code\":\"" + code + "\"}");
+                "{\"success\":true,\"model_code\":\"" + code
+                + "\",\"model_key\":\"" + info.model_key + "\"}");
         });
 
     // Delete model (soft)
@@ -1971,7 +2064,8 @@ int main(int argc, char* argv[]) {
                       svc_config.mqtt_client_id,
                       "/etc/dev-sys-cloud/certs/ca.pem",
                       "/etc/dev-sys-cloud/certs/client.pem",
-                      "/etc/dev-sys-cloud/certs/client_key.pem") != StatusCode::OK) {
+                      "/etc/dev-sys-cloud/certs/client_key.pem",
+                      "cloud/platform") != StatusCode::OK) {
         std::cerr << "[Main] MQTT connection failed — HTTP API still available" << std::endl;
         *mqtt_connected = false;
     } else {

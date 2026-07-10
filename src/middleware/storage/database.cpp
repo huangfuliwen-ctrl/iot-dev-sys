@@ -259,6 +259,7 @@ StatusCode Database::create_device_models_table() {
         CREATE TABLE IF NOT EXISTS device_models (
             id              SERIAL PRIMARY KEY,
             model_code      TEXT NOT NULL UNIQUE,
+            model_key       TEXT NOT NULL DEFAULT '',
             type_code       TEXT NOT NULL,
             display_name    TEXT NOT NULL,
             description     TEXT NOT NULL DEFAULT '',
@@ -376,6 +377,14 @@ StatusCode Database::migrate_if_needed() {
         current_version = 1;
     }
 
+    if (current_version < 2) {
+        std::cout << "[DB] Running migration v2: add model_key column" << std::endl;
+        execute("ALTER TABLE device_models ADD COLUMN IF NOT EXISTS model_key TEXT NOT NULL DEFAULT ''");
+        execute("CREATE INDEX IF NOT EXISTS idx_dm_key ON device_models(model_key)");
+        execute("INSERT INTO schema_version (version) VALUES (2)");
+        current_version = 2;
+    }
+
     std::cout << "[DB] Schema migration complete. Version: " << current_version << std::endl;
 #else
     std::cout << "[DB] In-memory mode: schema migration skipped." << std::endl;
@@ -490,18 +499,21 @@ DeviceTypeInfo Database::type_from_row(const std::vector<std::string>& row) cons
 
 DeviceModelInfo Database::model_from_row(const std::vector<std::string>& row) const {
     DeviceModelInfo info;
-    if (row.size() < 7) return info;
+    if (row.size() < 12) return info;
+    // Explicit column order: id,model_code,model_key,type_code,display_name,
+    //   description,specs_json,firmware_base,is_active,sort_order,created_at,updated_at
     info.id            = std::stoi(row[0]);
     info.model_code    = row[1];
-    info.type_code     = row[2];
-    info.display_name  = row[3];
-    info.description   = row.size() > 4 ? row[4] : "";
-    info.specs_json    = row.size() > 5 ? row[5] : "{}";
-    info.firmware_base = row.size() > 6 ? row[6] : "1.0.0";
-    info.is_active     = row.size() > 7 ? (row[7] == "t" || row[7] == "true" || row[7] == "TRUE" || row[7] == "1") : true;
-    info.sort_order    = row.size() > 8 ? std::stoi(row[8]) : 0;
-    info.created_at    = row.size() > 9 ? row[9] : "";
-    info.updated_at    = row.size() > 10 ? row[10] : "";
+    info.model_key     = row[2];
+    info.type_code     = row[3];
+    info.display_name  = row[4];
+    info.description   = row[5];
+    info.specs_json    = row[6];
+    info.firmware_base = row[7];
+    info.is_active     = (row[8] == "t" || row[8] == "true" || row[8] == "TRUE" || row[8] == "1");
+    info.sort_order    = std::stoi(row[9]);
+    info.created_at    = row[10];
+    info.updated_at    = row[11];
     return info;
 }
 
@@ -777,17 +789,18 @@ std::vector<DeviceTypeInfo> Database::list_device_types(bool active_only) {
 StatusCode Database::insert_device_model(const DeviceModelInfo& info) {
     std::ostringstream sql;
     sql << "INSERT INTO device_models "
-        << "(model_code, type_code, display_name, description, specs_json, firmware_base, sort_order) VALUES ("
-        << sql_str(info.model_code) << "," << sql_str(info.type_code) << ","
-        << sql_str(info.display_name) << "," << sql_str(info.description) << ","
-        << sql_str(info.specs_json) << "," << sql_str(info.firmware_base) << ","
-        << info.sort_order << ")";
+        << "(model_code, model_key, type_code, display_name, description, specs_json, firmware_base, sort_order) VALUES ("
+        << sql_str(info.model_code) << "," << sql_str(info.model_key) << ","
+        << sql_str(info.type_code) << "," << sql_str(info.display_name) << ","
+        << sql_str(info.description) << "," << sql_str(info.specs_json) << ","
+        << sql_str(info.firmware_base) << "," << info.sort_order << ")";
     return execute(sql.str());
 }
 
 StatusCode Database::update_device_model(const DeviceModelInfo& info) {
     std::ostringstream sql;
-    sql << "UPDATE device_models SET type_code=" << sql_str(info.type_code)
+    sql << "UPDATE device_models SET model_key=" << sql_str(info.model_key)
+        << ",type_code=" << sql_str(info.type_code)
         << ",display_name=" << sql_str(info.display_name)
         << ",description=" << sql_str(info.description)
         << ",specs_json=" << sql_str(info.specs_json)
@@ -803,16 +816,29 @@ StatusCode Database::delete_device_model(const std::string& model_code) {
                    "WHERE model_code=" + sql_str(model_code));
 }
 
+std::optional<DeviceModelInfo> Database::get_device_model_by_key(const std::string& model_key) {
+    std::vector<std::vector<std::string>> rows;
+    query("SELECT id,model_code,model_key,type_code,display_name,description,"
+          "specs_json,firmware_base,is_active,sort_order,created_at,updated_at "
+          "FROM device_models WHERE model_key=" + sql_str(model_key), rows);
+    if (rows.empty()) return std::nullopt;
+    return model_from_row(rows[0]);
+}
+
 std::optional<DeviceModelInfo> Database::get_device_model(const std::string& model_code) {
     std::vector<std::vector<std::string>> rows;
-    query("SELECT * FROM device_models WHERE model_code=" + sql_str(model_code), rows);
+    query("SELECT id,model_code,model_key,type_code,display_name,description,"
+          "specs_json,firmware_base,is_active,sort_order,created_at,updated_at "
+          "FROM device_models WHERE model_code=" + sql_str(model_code), rows);
     if (rows.empty()) return std::nullopt;
     return model_from_row(rows[0]);
 }
 
 std::vector<DeviceModelInfo> Database::list_device_models(const std::string& type_code, bool active_only) {
     std::vector<DeviceModelInfo> result;
-    std::string sql = "SELECT * FROM device_models WHERE 1=1";
+    std::string sql = "SELECT id,model_code,model_key,type_code,display_name,description,"
+                      "specs_json,firmware_base,is_active,sort_order,created_at,updated_at "
+                      "FROM device_models WHERE 1=1";
     if (!type_code.empty()) sql += " AND type_code=" + sql_str(type_code);
     if (active_only) sql += " AND is_active=TRUE";
     sql += " ORDER BY type_code, sort_order ASC";

@@ -70,6 +70,7 @@ public:
     StatusCode update_device_model(const DeviceModelInfo& info);
     StatusCode delete_device_model(const std::string& model_code);
     std::optional<DeviceModelInfo> get_device_model(const std::string& model_code);
+    std::optional<DeviceModelInfo> get_device_model_by_key(const std::string& model_key);
     std::vector<DeviceModelInfo> list_device_models(const std::string& type_code = "",
                                                      bool active_only = false);
 

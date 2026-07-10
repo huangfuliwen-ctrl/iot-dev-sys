@@ -6,6 +6,13 @@
 #include <map>
 #include <optional>
 #include <sstream>
+#include <chrono>
+#include <random>
+#include <cstring>
+
+#ifdef HAS_OPENSSL
+#include <openssl/rand.h>
+#endif
 
 namespace dev_sys {
 
@@ -40,7 +47,8 @@ struct DeviceTypeInfo {
 // ============================================================
 struct DeviceModelInfo {
     int32_t     id = 0;               // auto-increment PK
-    std::string model_code;           // unique key, e.g. "ACM-200"
+    std::string model_code;           // unique display code, e.g. "ACM-200"
+    std::string model_key;            // device-side key, e.g. "acm_200_v1" (no spaces/special chars)
     std::string type_code;            // FK → device_types.type_code
     std::string display_name;         // e.g. "ACM-200 旗舰版"
     std::string description;
@@ -50,6 +58,68 @@ struct DeviceModelInfo {
     int32_t     sort_order = 0;
     std::string created_at;
     std::string updated_at;
+};
+
+// ============================================================
+// ULID Generator — 26-char sortable ID for device model_key
+// Crockford base32: 0123456789ABCDEFGHJKMNPQRSTVWXYZ
+// ============================================================
+struct UlidGenerator {
+    static std::string generate() {
+        // 48-bit timestamp (milliseconds since epoch) → 10 base32 chars
+        auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count();
+        // 80-bit random → 16 base32 chars
+        uint8_t rand_bytes[10];
+#ifdef HAS_OPENSSL
+        // cryptographically secure
+        RAND_bytes(rand_bytes, sizeof(rand_bytes));
+#else
+        // fallback: std::random_device
+        static thread_local std::random_device rd;
+        static thread_local std::mt19937_64 gen(rd());
+        static thread_local std::uniform_int_distribution<uint64_t> dis;
+        for (int i = 0; i < 5; i++) {
+            uint64_t v = dis(gen);
+            rand_bytes[i*2]   = v & 0xFF;
+            rand_bytes[i*2+1] = (v >> 8) & 0xFF;
+        }
+#endif
+        std::string ulid;
+        ulid.reserve(26);
+        // Encode timestamp (10 chars from 6 bytes)
+        encode_time(ulid, ms);
+        // Encode random (16 chars from 10 bytes)
+        encode_random(ulid, rand_bytes);
+        return ulid;
+    }
+
+private:
+    static const char* crockford() {
+        return "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
+    }
+
+    static void encode_time(std::string& s, uint64_t ms) {
+        // 48 bits = 6 bytes, encode as 10 base32 chars
+        // Each 5 bits → 1 char, 48 bits = 10 chars (need 50 bits, pad 2 zero bits)
+        uint64_t v = ms & 0xFFFFFFFFFFFFULL; // 48-bit mask
+        for (int i = 0; i < 10; i++) {
+            int shift = 45 - i * 5; // 45, 40, 35, ..., 0
+            s += crockford()[(v >> shift) & 0x1F];
+            if (shift == 0) break;
+        }
+    }
+
+    static void encode_random(std::string& s, const uint8_t* r) {
+        // 80 bits = 10 bytes = 16 groups of 5 bits
+        for (int i = 0; i < 16; i++) {
+            int bit_off = i * 5;
+            int byte_off = bit_off / 8;
+            int bit_pos  = bit_off % 8;
+            uint16_t word = (r[byte_off] << 8) | (byte_off + 1 < 10 ? r[byte_off + 1] : 0);
+            s += crockford()[(word >> (11 - bit_pos)) & 0x1F];
+        }
+    }
 };
 
 // ============================================================
@@ -212,25 +282,23 @@ struct Device {
 
 // Request: device → cloud
 struct ActivationRequest {
-    std::string  hardware_uid;      // unique hardware identifier
-    std::string  model;             // device model string
-    DeviceType   device_type = DeviceType::OTHER;
-    std::string  firmware_version;
-    std::string  mac_address;
-    std::string  tenant_id;         // which tenant this device belongs to
+    std::string  uid;         // hardware unique ID (chip serial / eFuse)
+    std::string  model_key;   // device model key (ULID, e.g. "01KX5M2KM8EBW9G1CWVMJ94TSK")
 };
 
 // Response: cloud → device
 struct ActivationResponse {
     bool         success = false;
     std::string  device_id;         // assigned by cloud
+    std::string  model_key;         // echo back
+    std::string  model_code;        // resolved from model_key
     std::string  tenant_id;
     std::string  product_id;
-    std::string  activation_token;  // JWT or opaque token for MQTT auth
+    std::string  device_type;       // resolved: "coffee_machine" etc
+    std::string  firmware_version;  // from model's firmware_base
+    std::string  activation_token;
     std::string  mqtt_broker_uri;
-    std::string  certificate_pem;   // optional: device client cert (mTLS)
-    std::string  private_key_pem;   // optional: device private key
-    int32_t      ttl_seconds = 0;   // token validity period
+    int32_t      ttl_seconds = 0;
     std::string  error_message;
     int32_t      error_code = 0;
 };

@@ -26,13 +26,23 @@ find_package(Threads REQUIRED)
 # External dependencies (can be overridden for embedded builds)
 option(USE_SYSTEM_OPENSSL "Use system OpenSSL" ON)
 option(USE_SYSTEM_CURL   "Use system libcurl"   ON)
-option(USE_SYSTEM_SQLITE "Use system SQLite3"   ON)
-option(USE_SYSTEM_LIBPQ  "Use PostgreSQL libpq"  OFF)
-option(USE_SYSTEM_PAHO   "Use Eclipse Paho MQTT C++" OFF)
+option(USE_SYSTEM_LIBPQ  "Use PostgreSQL libpq"  ON)
+option(USE_SYSTEM_PAHO   "Use Eclipse Paho MQTT C++" ON)
 option(BUILD_TESTS       "Build unit tests"      ON)
 
-# Conditional compile definitions are set per-target in src/CMakeLists
-# based on actual find_package results
+# Conditional compile definitions
+if(USE_SYSTEM_OPENSSL)
+    add_compile_definitions(HAS_OPENSSL)
+endif()
+if(USE_SYSTEM_CURL)
+    add_compile_definitions(HAS_CURL)
+endif()
+if(USE_SYSTEM_LIBPQ)
+    add_compile_definitions(HAS_LIBPQ)
+endif()
+if(USE_SYSTEM_PAHO)
+    add_compile_definitions(HAS_PAHO)
+endif()
 
 # Common include directory
 include_directories(${CMAKE_SOURCE_DIR}/include)

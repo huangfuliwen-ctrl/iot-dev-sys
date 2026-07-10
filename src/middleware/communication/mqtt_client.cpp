@@ -3,6 +3,7 @@
 #include <iostream>
 #include <cstring>
 #include <atomic>
+#include <chrono>
 
 #ifdef HAS_PAHO
 #include <mqtt/async_client.h>
@@ -53,7 +54,9 @@ StatusCode MqttClient::connect(const std::string& broker_uri,
                                 const std::string& client_id,
                                 const std::string& ca_cert_path,
                                 const std::string& device_cert_path,
-                                const std::string& device_key_path) {
+                                const std::string& device_key_path,
+                                const std::string& username,
+                                const std::string& password) {
     impl_->broker_uri = broker_uri;
     impl_->client_id = client_id;
     impl_->ca_cert_path = ca_cert_path;
@@ -75,6 +78,8 @@ StatusCode MqttClient::connect(const std::string& broker_uri,
         conn_opts.set_keep_alive_interval(MQTT_DEFAULT_KEEPALIVE_SEC);
         conn_opts.set_clean_start(true);
         conn_opts.set_automatic_reconnect(impl_->reconnect_enabled);
+        if (!username.empty()) conn_opts.set_user_name(username);
+        if (!password.empty()) conn_opts.set_password(password);
 
         bool use_tls = broker_uri.find("ssl://") == 0 ||
                        broker_uri.find("tls://") == 0 ||
@@ -95,10 +100,17 @@ StatusCode MqttClient::connect(const std::string& broker_uri,
             conn_opts.set_will(will_msg);
         }
 
-        impl_->async_client->connect(conn_opts)->wait();
-        impl_->connected = true;
-        std::cout << "[MqttClient] Connected: " << broker_uri << std::endl;
-        return StatusCode::OK;
+        auto conn_tok = impl_->async_client->connect(conn_opts);
+        if (conn_tok->wait_for(std::chrono::seconds(10))) {
+            impl_->connected = true;
+            std::cout << "[MqttClient] Connected: " << broker_uri << std::endl;
+            return StatusCode::OK;
+        } else {
+            std::cerr << "[MqttClient] Connect timeout after 10s" << std::endl;
+            impl_->async_client.reset();
+            impl_->paho_cb.reset();
+            return StatusCode::COMM_DISCONNECTED;
+        }
     } catch (const mqtt::exception& e) {
         std::cerr << "[MqttClient] Connect failed: " << e.what() << std::endl;
         impl_->async_client.reset();
@@ -235,7 +247,8 @@ static bool tcp_ping(const std::string& host, int port) {
 MqttClient::MqttClient() : impl_(std::make_unique<Impl>()) {}
 MqttClient::~MqttClient() {}
 StatusCode MqttClient::connect(const std::string& u, const std::string& c, const std::string&,
-                                const std::string&, const std::string&) {
+                                const std::string&, const std::string&, const std::string&,
+                                const std::string&) {
     impl_->broker_uri = u; impl_->client_id = c;
     parse_broker_uri(u, impl_->broker_host, impl_->broker_port);
     impl_->connected = tcp_ping(impl_->broker_host, impl_->broker_port);

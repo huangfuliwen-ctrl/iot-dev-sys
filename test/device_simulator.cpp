@@ -1,27 +1,24 @@
 /**
- * device_simulator.cpp — 模拟IoT设备程序
+ * device_simulator.cpp — IoT设备模拟器（MQTT + HTTP 双通道完整流程）
  *
- * 用途：模拟一台真实设备，用于测试dev-sys-cloud云平台的所有API接口。
- * 通信方式：HTTP (REST API)，无需MQTT Broker或TLS证书。
+ * 模拟一台新设备从激活到正常运行的全生命周期。
+ * 通信方式：
+ *   HTTP — 设备激活、配方同步、配置拉取、OTA固件下载
+ *   MQTT — 心跳、属性上报、事件上报、OTA进度、接收下行指令
  *
- * 模拟流程：
- *   1. 设备激活 (POST /api/v1/device/activate)
- *   2. 心跳保活 (POST /api/v1/device/heartbeat，周期发送)
- *   3. 属性上报 (POST /api/v1/device/properties)
- *   4. 事件上报 (POST /api/v1/device/events) — 订单/故障
- *   5. OTA检查与进度上报 (GET /api/v1/device/ota/check)
- *   6. 配方同步 (GET /api/v1/recipes/sync)
- *   7. 配置拉取 (GET /api/v1/device/config)
+ * 流程（对应SRS附录8）：
+ *   阶段1: HTTP设备激活 → 获取 device_id + token
+ *   阶段2: MQTT连接Broker → 订阅下行Topic
+ *   阶段3: 正常运行（心跳+属性+事件+配置+配方）
+ *   阶段4: OTA升级（接收MQTT通知→HTTP下载→MQTT上报进度）
  *
- * 编译：
- *   g++ -std=c++17 -o device_simulator test/device_simulator.cpp
+ * 编译：项目CMakeLists.txt自动编译此文件（无需外部MQTT库）
+ *   cmake -B build && make -C build device_simulator
  *
  * 使用：
- *   ./device_simulator [--url http://127.0.0.1:8080] [--tenant demo] [--interval 10]
+ *   ./build/bin/device_simulator --url http://127.0.0.1:9080 --mqtt tcp://127.0.0.1:1883
  */
-
 #include <iostream>
-#include <string>
 #include <sstream>
 #include <iomanip>
 #include <vector>
@@ -33,6 +30,9 @@
 #include <cstring>
 #include <ctime>
 #include <random>
+#include <fstream>
+#include <algorithm>
+
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
@@ -40,179 +40,188 @@
 #include <netdb.h>
 
 // ============================================================
-// 轻量级HTTP客户端（POSIX socket，零外部依赖）
+// 工具函数
+// ============================================================
+namespace util {
+inline std::string now_iso() {
+    auto t = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
+    std::ostringstream oss;
+    oss << std::put_time(std::gmtime(&t), "%Y-%m-%dT%H:%M:%SZ");
+    return oss.str();
+}
+inline std::string random_hex(int bytes) {
+    static std::mt19937 gen(std::random_device{}());
+    std::ostringstream oss; oss << std::hex << std::setfill('0');
+    for (int i = 0; i < bytes; i++) oss << std::setw(2) << (gen() & 0xFF);
+    return oss.str();
+}
+inline std::string escape(const std::string& s) {
+    std::string o; for (char c : s) { if (c=='"') o+="\\\""; else if (c=='\\') o+="\\\\"; else o+=c; } return o;
+}
+inline std::string json_get_str(const std::string& j, const std::string& k) {
+    auto p = j.find("\""+k+"\":\""); if (p==std::string::npos) return "";
+    p += k.size()+4; auto e = j.find('"', p); return (e!=std::string::npos) ? j.substr(p,e-p) : "";
+}
+inline int json_get_int(const std::string& j, const std::string& k, int d=0) {
+    auto p = j.find("\""+k+"\":"); if (p==std::string::npos) return d;
+    p += k.size()+3; auto e = j.find_first_of(",}\n\r ]",p);
+    try { return std::stoi(j.substr(p,e-p)); } catch(...) { return d; }
+}
+inline bool json_get_bool(const std::string& j, const std::string& k, bool d=false) {
+    auto p = j.find("\""+k+"\":"); if (p==std::string::npos) return d;
+    return j.find("true",p) < j.find_first_of(",}\n\r",p);
+}
+} // namespace util
+
+// ============================================================
+// 轻量HTTP客户端（POSIX socket）
 // ============================================================
 class SimHttpClient {
+    std::string host_; int port_ = 80;
 public:
-    SimHttpClient(const std::string& base_url)
-        : base_url_(base_url) {
-        // Parse host:port from base_url
-        std::string url = base_url;
-        if (url.find("http://") == 0) url = url.substr(7);
-        else if (url.find("https://") == 0) url = url.substr(8);
-        size_t colon = url.find(':');
-        size_t slash = url.find('/');
-        if (colon != std::string::npos) {
-            host_ = url.substr(0, colon);
-            port_ = std::stoi(url.substr(colon + 1, slash - colon - 1));
-        } else {
-            host_ = slash != std::string::npos ? url.substr(0, slash) : url;
-            port_ = 80;
-        }
+    struct Response { int status = 0; std::string body; };
+    SimHttpClient(const std::string& base_url) {
+        std::string u = base_url;
+        if (u.find("http://")==0) u=u.substr(7);
+        size_t c=u.find(':'), s=u.find('/');
+        host_ = (c!=std::string::npos) ? u.substr(0,c) : u.substr(0,s);
+        port_ = (c!=std::string::npos) ? std::stoi(u.substr(c+1,s-c-1)) : 80;
     }
-
-    struct Response {
-        int status = 0;
-        std::string body;
-    };
-
-    Response post(const std::string& path, const std::string& json_body) {
-        return request("POST", path, json_body);
-    }
-
-    Response get(const std::string& path) {
-        return request("GET", path, "");
-    }
-
-    Response put(const std::string& path, const std::string& json_body) {
-        return request("PUT", path, json_body);
-    }
-
+    Response post(const std::string& path, const std::string& body) { return req("POST",path,body); }
+    Response get(const std::string& path) { return req("GET",path,""); }
 private:
-    Response request(const std::string& method, const std::string& path,
-                     const std::string& body) {
-        Response resp;
-        int sock = socket(AF_INET, SOCK_STREAM, 0);
-        if (sock < 0) {
-            std::cerr << "[HTTP] socket() failed" << std::endl;
-            return resp;
-        }
-
-        struct timeval tv{};
-        tv.tv_sec = 10;
-        tv.tv_usec = 0;
-        setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-        setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
-
-        struct hostent* server = gethostbyname(host_.c_str());
-        if (!server) {
-            std::cerr << "[HTTP] gethostbyname() failed for " << host_ << std::endl;
-            close(sock);
-            return resp;
-        }
-
-        struct sockaddr_in addr{};
-        addr.sin_family = AF_INET;
-        memcpy(&addr.sin_addr.s_addr, server->h_addr, static_cast<size_t>(server->h_length));
-        addr.sin_port = htons(port_);
-
-        if (connect(sock, reinterpret_cast<struct sockaddr*>(&addr), sizeof(addr)) < 0) {
-            std::cerr << "[HTTP] connect() to " << host_ << ":" << port_ << " failed" << std::endl;
-            close(sock);
-            return resp;
-        }
-
-        // Build HTTP request
-        std::ostringstream req;
-        req << method << " " << path << " HTTP/1.1\r\n";
-        req << "Host: " << host_ << ":" << port_ << "\r\n";
-        req << "Content-Type: application/json\r\n";
-        req << "Connection: close\r\n";
-        if (!body.empty()) {
-            req << "Content-Length: " << body.size() << "\r\n";
-        }
-        req << "\r\n";
-        if (!body.empty()) {
-            req << body;
-        }
-
-        std::string req_str = req.str();
-        ssize_t sent = send(sock, req_str.c_str(), req_str.size(), 0);
-        if (sent < 0) {
-            std::cerr << "[HTTP] send() failed" << std::endl;
-            close(sock);
-            return resp;
-        }
-
-        // Read response
-        char buf[65536];
-        ssize_t n = recv(sock, buf, sizeof(buf) - 1, 0);
-        close(sock);
-
-        if (n <= 0) return resp;
-
-        buf[n] = '\0';
-        std::string raw(buf, n);
-
-        // Parse HTTP response
-        size_t status_start = raw.find(' ');
-        if (status_start != std::string::npos) {
-            resp.status = std::stoi(raw.substr(status_start + 1, 3));
-        }
-
-        size_t body_start = raw.find("\r\n\r\n");
-        if (body_start != std::string::npos) {
-            resp.body = raw.substr(body_start + 4);
-        }
-
-        return resp;
+    Response req(const std::string& m, const std::string& path, const std::string& body) {
+        Response r; int fd=socket(AF_INET,SOCK_STREAM,0); if(fd<0)return r;
+        timeval tv{10,0}; setsockopt(fd,SOL_SOCKET,SO_RCVTIMEO,&tv,sizeof(tv));
+        setsockopt(fd,SOL_SOCKET,SO_SNDTIMEO,&tv,sizeof(tv));
+        hostent* h=gethostbyname(host_.c_str()); if(!h){close(fd);return r;}
+        sockaddr_in a{}; a.sin_family=AF_INET; memcpy(&a.sin_addr,h->h_addr,h->h_length); a.sin_port=htons(port_);
+        if(connect(fd,(sockaddr*)&a,sizeof(a))<0){close(fd);return r;}
+        std::ostringstream rs; rs<<m<<" "<<path<<" HTTP/1.1\r\nHost: "<<host_<<":"<<port_
+           <<"\r\nContent-Type: application/json\r\nConnection: close\r\n";
+        if(!body.empty()) rs<<"Content-Length: "<<body.size()<<"\r\n";
+        rs<<"\r\n"<<body;
+        std::string s=rs.str(); send(fd,s.c_str(),s.size(),0);
+        char buf[65536]; ssize_t n=recv(fd,buf,sizeof(buf)-1,0); close(fd);
+        if(n<=0)return r; buf[n]=0;
+        size_t st=std::string(buf).find(' '); if(st!=std::string::npos) r.status=std::stoi(std::string(buf).substr(st+1,3));
+        size_t bs=std::string(buf).find("\r\n\r\n"); if(bs!=std::string::npos) r.body=std::string(buf).substr(bs+4);
+        return r;
     }
-
-    std::string base_url_;
-    std::string host_;
-    int port_ = 80;
 };
 
 // ============================================================
-// JSON构建辅助（最小实现，无需第三方库）
+// 极简MQTT 3.1.1客户端（POSIX socket，零外部依赖）
+// 仅实现CONNECT/PUBLISH/SUBSCRIBE/PINGREQ/DISCONNECT
 // ============================================================
-namespace json {
+class SimMqttClient {
+    int fd_ = -1;
+    std::string host_; int port_ = 1883;
+    std::string client_id_, user_, pass_;
+    std::atomic<bool> connected_{false};
+    std::thread recv_thread_;
+    std::function<void(const std::string& topic, const std::string& payload)> msg_cb_;
+    uint16_t pkt_id_ = 1;
 
-inline std::string escape(const std::string& s) {
-    std::string out;
-    for (char c : s) {
-        if (c == '"') out += "\\\"";
-        else if (c == '\\') out += "\\\\";
-        else if (c == '\n') out += "\\n";
-        else out += c;
+    // 编码 remaining length (MQTT 3.1.1)
+    static std::string encode_len(uint32_t len) {
+        std::string r; do { uint8_t b=len&0x7F; len>>=7; if(len)b|=0x80; r+=(char)b; } while(len); return r;
     }
-    return out;
-}
-
-inline std::string get_string(const std::string& json, const std::string& key) {
-    std::string search = "\"" + key + "\":\"";
-    size_t pos = json.find(search);
-    if (pos != std::string::npos) {
-        size_t start = pos + search.size();
-        size_t end = json.find('"', start);
-        if (end != std::string::npos) return json.substr(start, end - start);
+    // 编码 UTF-8 string
+    static std::string encode_str(const std::string& s) {
+        uint16_t l=htons(s.size()); return std::string((char*)&l,2)+s;
     }
-    return "";
-}
-
-inline int get_int(const std::string& json, const std::string& key, int def = 0) {
-    std::string search = "\"" + key + "\":";
-    size_t pos = json.find(search);
-    if (pos != std::string::npos) {
-        size_t start = pos + search.size();
-        size_t end = json.find_first_of(",}\n\r ]", start);
-        std::string num = json.substr(start, end - start);
-        if (!num.empty()) return std::stoi(num);
+    // 读取 exactly N 字节
+    bool read_exact(void* buf, size_t n) {
+        size_t off=0; auto* p=(char*)buf;
+        while(off<n){ auto r=recv(fd_,p+off,n-off,0); if(r<=0)return false; off+=r; }
+        return true;
     }
-    return def;
-}
-
-inline bool get_bool(const std::string& json, const std::string& key, bool def = false) {
-    std::string search = "\"" + key + "\":";
-    size_t pos = json.find(search);
-    if (pos != std::string::npos) {
-        if (json.find("true", pos) < json.find_first_of(",}\n\r", pos)) return true;
-        if (json.find("false", pos) < json.find_first_of(",}\n\r", pos)) return false;
+    // 读取一个 MQTT 包
+    bool read_packet(uint8_t& type, std::string& payload) {
+        uint8_t hdr; if(!read_exact(&hdr,1)) return false;
+        type=hdr>>4; uint32_t len=0,shift=0;
+        while(true){ uint8_t b; if(!read_exact(&b,1))return false; len|=(b&0x7F)<<shift; shift+=7; if(!(b&0x80))break; }
+        payload.resize(len); if(len>0&&!read_exact(&payload[0],len)) return false;
+        return true;
     }
-    return def;
-}
 
-} // namespace json
+public:
+    bool connect(const std::string& uri, const std::string& cid, const std::string& user, const std::string& pass) {
+        std::string u=uri;
+        if(u.find("tcp://")==0) u=u.substr(6);
+        else if(u.find("ssl://")==0) u=u.substr(6);
+        else if(u.find("tls://")==0) u=u.substr(6);
+        else if(u.find("mqtt://")==0) u=u.substr(7);
+        size_t c=u.find(':'); host_=(c!=std::string::npos)?u.substr(0,c):u; port_=(c!=std::string::npos)?std::stoi(u.substr(c+1)):1883;
+        client_id_=cid; user_=user; pass_=pass;
+
+        fd_=socket(AF_INET,SOCK_STREAM,0); if(fd_<0)return false;
+        timeval tv{30,0}; setsockopt(fd_,SOL_SOCKET,SO_RCVTIMEO,&tv,sizeof(tv));
+        hostent* h=gethostbyname(host_.c_str()); if(!h){close(fd_);fd_=-1;return false;}
+        sockaddr_in a{}; a.sin_family=AF_INET; memcpy(&a.sin_addr,h->h_addr,h->h_length); a.sin_port=htons(port_);
+        if(::connect(fd_,(sockaddr*)&a,sizeof(a))<0){close(fd_);fd_=-1;return false;}
+
+        // Build CONNECT
+        std::string var; var+="\x00\x04MQTT\x04\x02\x00\x3C"; // protocol MQTT v3.1.1, keepalive 60s, clean session
+        var+=encode_str(client_id_);
+        if(!user_.empty()&&!pass_.empty()){ var+=encode_str(user_); var+=encode_str(pass_); }
+        std::string pkt; pkt+=(char)0x10; pkt+=encode_len(var.size()); pkt+=var;
+        send(fd_,pkt.c_str(),pkt.size(),0);
+
+        // Read CONNACK
+        std::string pl; uint8_t tp;
+        if(!read_packet(tp,pl)||tp!=2||pl.size()<2){close(fd_);fd_=-1;return false;}
+        if(pl[1]!=0){ std::cerr<<"[MQTT] CONNACK code="<<(int)pl[1]<<std::endl; close(fd_);fd_=-1;return false; }
+        connected_=true;
+        recv_thread_=std::thread([this]{ recv_loop(); });
+        std::cout<<"[MQTT] Connected to "<<host_<<":"<<port_<<std::endl;
+        return true;
+    }
+    bool subscribe(const std::string& topic, int qos=1) {
+        if(!connected_)return false;
+        uint16_t pid=htons(pkt_id_++);
+        std::string var; var.append((char*)&pid,2);
+        var+=encode_str(topic); var+=(char)qos;
+        std::string pkt; pkt+=(char)0x82; pkt+=encode_len(var.size()); pkt+=var;
+        send(fd_,pkt.c_str(),pkt.size(),0);
+        return true;
+    }
+    bool publish(const std::string& topic, const std::string& payload, int qos=1) {
+        if(!connected_)return false;
+        std::string var; var+=encode_str(topic);
+        if(qos>0){ uint16_t pid=htons(pkt_id_++); var.append((char*)&pid,2); }
+        var+=payload;
+        uint8_t hdr=(uint8_t)(0x30|(qos<<1));
+        std::string pkt; pkt+=(char)hdr; pkt+=encode_len(var.size()); pkt+=var;
+        send(fd_,pkt.c_str(),pkt.size(),0);
+        return true;
+    }
+    void disconnect() {
+        connected_=false;
+        if(fd_>=0){ char d[]={(char)0xE0,0x00}; send(fd_,d,2,0); close(fd_); fd_=-1; }
+        if(recv_thread_.joinable()) recv_thread_.join();
+    }
+    bool is_connected() const { return connected_; }
+    void on_message(std::function<void(const std::string&,const std::string&)> cb) { msg_cb_=cb; }
+
+private:
+    void recv_loop() {
+        while(connected_){
+            std::string pl; uint8_t tp;
+            if(!read_packet(tp,pl)){ connected_=false; break; }
+            if(tp==3 && msg_cb_){ // PUBLISH
+                size_t o=0; uint16_t tlen=(pl[0]<<8)|pl[1]; o=2+tlen;
+                std::string topic=pl.substr(2,tlen);
+                uint8_t qos=(tp>>1)&3;
+                if(qos>0) o+=2; // skip packet ID
+                std::string payload=pl.substr(o);
+                msg_cb_(topic,payload);
+            }
+            // PINGRESP, SUBACK, PUBACK are silently handled
+        }
+    }
+};
 
 // ============================================================
 // 设备模拟器
@@ -220,545 +229,299 @@ inline bool get_bool(const std::string& json, const std::string& key, bool def =
 class DeviceSimulator {
 public:
     struct Config {
-        std::string cloud_url    = "http://127.0.0.1:9080";
-        std::string tenant_id    = "tenant_demo";
+        std::string cloud_url  = "http://127.0.0.1:9080";
+        std::string mqtt_uri   = "tcp://127.0.0.1:1883";
+        std::string tenant_id  = "company_zhangsan";
         std::string hardware_uid = "";
-        std::string model        = "CM-2000";
-        std::string firmware_ver = "v2.0.5";
-        std::string mac_address  = "";
-        int         device_type  = 1;    // COFFEE_MACHINE
-        int         heartbeat_sec = 10;  // heartbeat interval
-        int         sim_duration_sec = 0; // 0 = run forever
-        bool        auto_mode    = true;
+        std::string model_key  = "01KX5M2KM8EBW9G1CWVMJ94TSK";
+        std::string firmware_ver = "v1.0.0";
+        std::string mac        = "";
+        int device_type = 1;       // 1=COFFEE_MACHINE
+        int heartbeat_sec = 30;
+        int sim_duration_sec = 0;
+        bool skip_mqtt = false;    // 纯HTTP模式（无Broker时）
     };
 
-    DeviceSimulator(const Config& cfg)
-        : cfg_(cfg), http_(cfg.cloud_url) {
-        if (cfg_.hardware_uid.empty()) {
-            cfg_.hardware_uid = "SIM-" + random_hex(16);
-        }
-        if (cfg_.mac_address.empty()) {
-            cfg_.mac_address = random_mac();
-        }
+    DeviceSimulator(const Config& c) : cfg_(c), http_(c.cloud_url) {
+        if(cfg_.hardware_uid.empty()) cfg_.hardware_uid = "SIM-" + util::random_hex(8);
+        if(cfg_.mac.empty()) cfg_.mac = util::random_hex(2)+":"+util::random_hex(2)+":"+util::random_hex(2)+":"+util::random_hex(2)+":"+util::random_hex(2)+":"+util::random_hex(2);
     }
+    ~DeviceSimulator() { if(mqtt_) mqtt_->disconnect(); }
 
     // ============================================================
-    // Phase 1: 设备激活
+    // 阶段1: HTTP设备激活
     // ============================================================
     bool activate() {
-        std::cout << "\n========== Phase 1: 设备激活 ==========" << std::endl;
+        log("══════ 阶段1: HTTP设备激活 (uid + model_key) ══════");
+        std::ostringstream b;
+        b<<"{\"uid\":\""<<cfg_.hardware_uid<<"\",\"model_key\":\""<<cfg_.model_key<<"\"}";
+        log("→ POST /api/v1/device/activate");
+        log("  {uid:"+cfg_.hardware_uid+", model_key:"+cfg_.model_key+"}");
 
-        std::ostringstream body;
-        body << "{"
-             << R"("hardware_uid":")" << cfg_.hardware_uid << R"(",)";
-        body << R"("model":")" << cfg_.model << R"(",)";
-        body << R"("firmware_version":")" << cfg_.firmware_ver << R"(",)";
-        body << R"("mac_address":")" << cfg_.mac_address << R"(",)";
-        body << R"("tenant_id":")" << cfg_.tenant_id << R"(",)";
-        body << R"("device_type":)" << cfg_.device_type;
-        body << "}";
+        auto r=http_.post("/api/v1/device/activate",b.str());
+        log("← HTTP "+std::to_string(r.status)+" "+(r.body.size()>300?r.body.substr(0,300)+"...":r.body));
 
-        std::cout << "[Activate] Request: " << body.str() << std::endl;
+        if(r.status==201||r.status==200){
+            device_id_  = util::json_get_str(r.body,"device_id");
+            tenant_id_  = util::json_get_str(r.body,"tenant_id");
+            product_id_ = util::json_get_str(r.body,"product_id");
+            token_      = util::json_get_str(r.body,"activation_token");
+            broker_uri_ = util::json_get_str(r.body,"mqtt_broker_uri");
+            model_code_ = util::json_get_str(r.body,"model_code");
+            fw_ver_     = util::json_get_str(r.body,"firmware_version");
+            if(broker_uri_.empty()) broker_uri_=cfg_.mqtt_uri;
 
-        auto resp = http_.post("/api/v1/device/activate", body.str());
-        std::cout << "[Activate] Response HTTP " << resp.status << ": "
-                  << (resp.body.size() > 500 ? resp.body.substr(0, 500) + "..." : resp.body)
-                  << std::endl;
-
-        if (resp.status == 200 || resp.status == 201) {
-            success_ = json::get_bool(resp.body, "success", false);
-            device_id_ = json::get_string(resp.body, "device_id");
-            tenant_id_ = json::get_string(resp.body, "tenant_id");
-            product_id_ = json::get_string(resp.body, "product_id");
-            token_ = json::get_string(resp.body, "activation_token");
-            broker_uri_ = json::get_string(resp.body, "mqtt_broker_uri");
-
-            std::cout << "[Activate] SUCCESS!" << std::endl;
-            std::cout << "  device_id:    " << device_id_ << std::endl;
-            std::cout << "  tenant_id:    " << tenant_id_ << std::endl;
-            std::cout << "  product_id:   " << product_id_ << std::endl;
-            std::cout << "  token:        " << token_.substr(0, 32) << "..." << std::endl;
-            std::cout << "  broker_uri:   " << broker_uri_ << std::endl;
+            log("✓ 激活成功");
+            log("  device_id:  "+device_id_);
+            log("  model:      "+model_code_);
+            log("  product_id: "+product_id_);
+            log("  firmware:   "+fw_ver_);
+            log("  token:      "+token_.substr(0,32)+"...");
+            save_credentials();
             return true;
-        } else {
-            std::cerr << "[Activate] FAILED!" << std::endl;
-            return false;
         }
+        log("✗ 激活失败"); return false;
+    }
+
+    // 检查是否已激活（本地有凭证文件则跳过HTTP激活）
+    bool try_load_credentials() {
+        std::ifstream f("./device_creds.json");
+        if (!f.is_open()) return false;
+        std::string j((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+        device_id_  = util::json_get_str(j, "device_id");
+        tenant_id_  = util::json_get_str(j, "tenant_id");
+        product_id_ = util::json_get_str(j, "product_id");
+        token_      = util::json_get_str(j, "token");
+        broker_uri_ = util::json_get_str(j, "broker_uri");
+        model_code_ = util::json_get_str(j, "model_code");
+        fw_ver_     = util::json_get_str(j, "firmware_version");
+        if (device_id_.empty() || token_.empty()) return false;
+        log("✓ 已激活设备（本地凭证）→ 跳过HTTP激活");
+        log("  device_id: "+device_id_+" model: "+model_code_);
+        return true;
+    }
+    void save_credentials() {
+        std::ofstream f("./device_creds.json");
+        f << "{\"device_id\":\"" << device_id_ << "\",\"tenant_id\":\"" << tenant_id_
+          << "\",\"product_id\":\"" << product_id_ << "\",\"token\":\"" << token_
+          << "\",\"broker_uri\":\"" << broker_uri_ << "\",\"model_code\":\"" << model_code_
+          << "\",\"firmware_version\":\"" << fw_ver_ << "\"}";
     }
 
     // ============================================================
-    // Phase 2: 心跳循环 + 事件模拟
+    // 阶段2: MQTT连接 + 订阅下行Topic
+    // ============================================================
+    bool connect_mqtt() {
+        if(cfg_.skip_mqtt){ log("⚠ MQTT skipped (--skip-mqtt)"); return true; }
+        log("\n══════ 阶段2: MQTT连接Broker ══════");
+        mqtt_=std::make_unique<SimMqttClient>();
+        if(!mqtt_->connect(broker_uri_,device_id_,device_id_,token_)){
+            log("✗ MQTT连接失败: "+broker_uri_);
+            return false;
+        }
+        // 接收下行消息
+        mqtt_->on_message([this](const std::string& t,const std::string& p){
+            log("[MQTT RECV] "+t+" → "+p.substr(0,120));
+            if(t.find("/ota/notify")!=std::string::npos) handle_ota_notify(p);
+            if(t.find("/property/set")!=std::string::npos) handle_config_set(p);
+            if(t.find("/command/")!=std::string::npos) handle_command(t,p);
+        });
+
+        // 订阅下行Topic
+        std::string base=tenant_id_+"/iot/"+product_id_+"/"+device_id_;
+        mqtt_->subscribe(base+"/property/set");
+        mqtt_->subscribe(base+"/ota/notify");
+        mqtt_->subscribe(base+"/command/+");
+        log("✓ MQTT已连接，已订阅3个下行Topic");
+
+        // 发布上线Will（下次connect时生效，此处手动发一条上线消息）
+        mqtt_->publish(base+"/heartbeat",R"({"status":"online","ts":")"+util::now_iso()+"\"}");
+        return true;
+    }
+
+    // ============================================================
+    // 阶段3: 正常运行循环
     // ============================================================
     void run() {
-        if (!success_) {
-            std::cerr << "[Sim] Device not activated, cannot run" << std::endl;
-            return;
-        }
+        log("\n══════ 阶段3: 正常运行（心跳"+std::to_string(cfg_.heartbeat_sec)+"s）══════");
+        auto start=std::chrono::steady_clock::now();
+        int cyc=0;
 
-        std::cout << "\n========== Phase 2: 运行中 (心跳周期: "
-                  << cfg_.heartbeat_sec << "秒) ==========" << std::endl;
+        // 启动时拉取配置
+        pull_config();
+        sync_recipes();
 
-        auto start_time = std::chrono::steady_clock::now();
-        int cycle = 0;
+        while(running_){
+            cyc++;
+            auto e=std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now()-start).count();
+            log("\n── 周期 "+std::to_string(cyc)+" (t+"+std::to_string(e)+"s) ──");
 
-        while (running_) {
-            cycle++;
-            auto now = std::chrono::steady_clock::now();
-            auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
-                now - start_time).count();
+            send_heartbeat();
+            if(cyc%3==0) send_properties();
+            simulate_events(cyc);
 
-            std::cout << "\n--- Cycle " << cycle << " (t+" << elapsed << "s) ---" << std::endl;
-
-            // 1. 心跳
-            send_heartbeat(cycle);
-
-            // 2. 属性上报（每3个周期）
-            if (cycle % 3 == 0) {
-                send_properties(cycle);
-            }
-
-            // 3. 自动模式：模拟业务事件
-            if (cfg_.auto_mode) {
-                simulate_events(cycle, elapsed);
-            }
-
-            // 4. 检查OTA更新（每5个周期）
-            if (cycle % 5 == 0) {
-                check_ota_update();
-            }
-
-            // 5. 配方同步（每10个周期）
-            if (cycle % 10 == 0) {
-                sync_recipes();
-            }
-
-            // 6. 拉取配置（每10个周期）
-            if (cycle % 10 == 0) {
-                pull_config();
-            }
-
-            // Duration check
-            if (cfg_.sim_duration_sec > 0 && elapsed >= cfg_.sim_duration_sec) {
-                std::cout << "\n[Sim] Duration reached, stopping..." << std::endl;
-                running_ = false;
-                break;
-            }
-
-            // Sleep until next heartbeat
+            if(cfg_.sim_duration_sec>0&&e>=cfg_.sim_duration_sec){ running_=false; break; }
             sleep_interval(cfg_.heartbeat_sec);
         }
     }
-
-    void stop() { running_ = false; }
-
+    void stop() { running_=false; }
+    bool is_activated() const { return !device_id_.empty(); }
     const std::string& device_id() const { return device_id_; }
-    const std::string& tenant_id() const { return tenant_id_; }
-    bool is_activated() const { return success_; }
 
 private:
-    // ============================================================
-    // 心跳上报
-    // ============================================================
-    void send_heartbeat(int cycle) {
-        DeviceStatus status = current_status_;
-        int signal = 80 + (rand() % 20); // 80-99
-        int alarms = (status == DeviceStatus::FAULT) ? 1 + rand() % 3 : 0;
-
-        std::ostringstream body;
-        body << "{"
-             << R"("device_id":")" << device_id_ << R"(",)";
-        body << R"("timestamp":")" << now_iso() << R"(",)";
-        body << R"("status":)" << static_cast<int>(status) << ",";
-        body << R"("firmware_version":")" << cfg_.firmware_ver << R"(",)";
-        body << R"("signal_strength":)" << signal << ",";
-        body << R"("alarm_count":)" << alarms;
-        body << "}";
-
-        auto resp = http_.post("/api/v1/device/heartbeat", body.str());
-        std::cout << "[Heartbeat] HTTP " << resp.status
-                  << " status=" << static_cast<int>(status)
-                  << " signal=" << signal << std::endl;
-    }
-
-    // ============================================================
-    // 属性上报
-    // ============================================================
-    void send_properties(int cycle) {
-        (void)cycle;
-        std::ostringstream body;
-        body << "{"
-             << R"("device_id":")" << device_id_ << R"(",)";
-        body << R"("properties":{)";
-        body << R"("cpu_temp_c":)" << (45 + rand() % 20) << ",";
-        body << R"("water_temp_c":)" << (85 + rand() % 10) << ",";
-        body << R"("bean_remaining_g":)" << (100 + rand() % 400) << ",";
-        body << R"("waste_bin_pct":)" << (10 + rand() % 30) << ",";
-        body << R"("uptime_seconds":)" << (cycle * cfg_.heartbeat_sec);
-        body << "}}";
-
-        auto resp = http_.post("/api/v1/device/properties", body.str());
-        std::cout << "[Properties] HTTP " << resp.status << std::endl;
-    }
-
-    // ============================================================
-    // 自动事件模拟
-    // ============================================================
-    void simulate_events(int cycle, int64_t elapsed) {
-        // 周期 7: 模拟下单
-        if (cycle == 7 && current_status_ == DeviceStatus::IDLE) {
-            simulate_order();
-        }
-
-        // 周期 15: 模拟故障
-        if (cycle == 15) {
-            simulate_fault();
-        }
-
-        // 周期 20: 故障恢复
-        if (cycle == 20 && current_status_ == DeviceStatus::FAULT) {
-            simulate_fault_recovery();
-        }
-
-        // 周期 25: 维护模式
-        if (cycle == 25) {
-            current_status_ = DeviceStatus::MAINTENANCE;
-            report_event("maintenance", R"({"action":"start","reason":"定期维护"})");
-            std::cout << "[Event] Entered MAINTENANCE mode" << std::endl;
-        }
-
-        if (cycle == 27) {
-            current_status_ = DeviceStatus::IDLE;
-            report_event("maintenance", R"({"action":"complete"})");
-            std::cout << "[Event] Exited MAINTENANCE mode" << std::endl;
+    void send_heartbeat() {
+        std::ostringstream b;
+        b<<"{\"device_id\":\""<<device_id_
+         <<"\",\"timestamp\":\""<<util::now_iso()
+         <<"\",\"status\":"<<(int)status_
+         <<",\"firmware_version\":\""<<cfg_.firmware_ver
+         <<"\",\"signal_strength\":"<<(80+rand()%20)
+         <<",\"alarm_count\":"<<((status_==DeviceStatus::FAULT)?1:0)<<"}";
+        if(mqtt_&&mqtt_->is_connected()){
+            std::string t=tenant_id_+"/iot/"+product_id_+"/"+device_id_+"/heartbeat";
+            mqtt_->publish(t,b.str());
+            log("[MQTT] heartbeat → "+t);
+        } else {
+            auto r=http_.post("/api/v1/device/heartbeat",b.str());
+            log("[HTTP] heartbeat → "+std::to_string(r.status));
         }
     }
-
-    void simulate_order() {
-        std::ostringstream body;
-        body << "{"
-             << R"("device_id":")" << device_id_ << R"(",)";
-        body << R"("tenant_id":")" << tenant_id_ << R"(",)";
-        body << R"("event_type":"order_created",)";
-        body << R"("payload":{)";
-        body << R"("order_id":"SIM-ORD-)" << random_hex(6) << R"(",)";
-        body << R"("recipe_id":"REC-AMERICANO-001",)";
-        body << R"("cup_size":"中",)";
-        body << R"("quantity":1,)";
-        body << R"("total_amount":1500,)";
-        body << R"("payment_method":"wechat")";
-        body << "}}";
-
-        auto resp = http_.post("/api/v1/device/events", body.str());
-        std::cout << "[Event] Order created, HTTP " << resp.status << std::endl;
-
-        // Then start brewing
-        current_status_ = DeviceStatus::BREWING;
-        std::cout << "[Event] Status → BREWING" << std::endl;
-
-        // Simulate brewing time (don't actually wait, just report)
-        report_event("brewing_started", R"({"order_id":"SIM-ORD"})");
-    }
-
-    void simulate_fault() {
-        current_status_ = DeviceStatus::FAULT;
-        std::ostringstream body;
-        body << "{"
-             << R"("device_id":")" << device_id_ << R"(",)";
-        body << R"("tenant_id":")" << tenant_id_ << R"(",)";
-        body << R"("event_type":"fault_detected",)";
-        body << R"("payload":{)";
-        body << R"("fault_code":3,)";       // PUMP_FAILURE
-        body << R"("fault_level":3,)";       // L3_SEVERE
-        body << R"("description":"水泵流量异常（模拟故障）",)";
-        body << R"("sensor_snapshot":{"flow_rate_ml_s":2.5,"target_flow":8.0)";
-        body << "}}";
-
-        auto resp = http_.post("/api/v1/device/events", body.str());
-        std::cout << "[Event] FAULT reported (PUMP_FAILURE L3), HTTP " << resp.status << std::endl;
-    }
-
-    void simulate_fault_recovery() {
-        current_status_ = DeviceStatus::IDLE;
-        std::ostringstream body;
-        body << "{"
-             << R"("device_id":")" << device_id_ << R"(",)";
-        body << R"("tenant_id":")" << tenant_id_ << R"(",)";
-        body << R"("event_type":"fault_resolved",)";
-        body << R"("payload":{)";
-        body << R"("fault_code":3)";
-        body << "}}";
-
-        auto resp = http_.post("/api/v1/device/events", body.str());
-        std::cout << "[Event] FAULT RESOLVED, HTTP " << resp.status << std::endl;
-    }
-
-    void report_event(const std::string& event_type, const std::string& payload_json) {
-        std::ostringstream body;
-        body << "{"
-             << R"("device_id":")" << device_id_ << R"(",)";
-        body << R"("tenant_id":")" << tenant_id_ << R"(",)";
-        body << R"("event_type":")" << event_type << R"(",)";
-        body << R"("payload":)" << payload_json;
-        body << "}";
-        http_.post("/api/v1/device/events", body.str());
-    }
-
-    // ============================================================
-    // OTA更新检查
-    // ============================================================
-    void check_ota_update() {
-        std::string path = "/api/v1/device/ota/check?device_id=" + device_id_;
-        auto resp = http_.get(path);
-        std::cout << "[OTA Check] HTTP " << resp.status;
-
-        if (resp.status == 200 && !resp.body.empty()) {
-            std::string version = json::get_string(resp.body, "version");
-            std::string url = json::get_string(resp.body, "download_url");
-            if (!version.empty()) {
-                std::cout << " update available: " << version;
-                // Simulate OTA progress
-                simulate_ota_progress(version);
-            } else {
-                std::cout << " no update available";
-            }
+    void send_properties() {
+        std::ostringstream b;
+        b<<"{\"device_id\":\""<<device_id_<<"\",\"properties\":{"
+         <<"\"cpu_temp_c\":"<<(45+rand()%20)<<",\"water_temp_c\":"<<(85+rand()%10)
+         <<",\"bean_remaining_g\":"<<(100+rand()%400)<<"}}";
+        if(mqtt_&&mqtt_->is_connected()){
+            mqtt_->publish(tenant_id_+"/iot/"+product_id_+"/"+device_id_+"/property/post",b.str());
+            log("[MQTT] properties sent");
         }
-        std::cout << std::endl;
     }
-
-    void simulate_ota_progress(const std::string& target_ver) {
-        // Report OTA progress in stages
-        struct OtaStage { int progress; const char* stage; };
-        const OtaStage stages[] = {
-            {10, "downloading"},
-            {40, "downloading"},
-            {70, "downloading"},
-            {100, "downloading"},
-            {0, "installing"},
-            {50, "installing"},
-            {100, "done"},
-        };
-
-        for (const auto& s : stages) {
-            std::ostringstream body;
-            body << "{"
-                 << R"("device_id":")" << device_id_ << R"(",)";
-            body << R"("version":")" << target_ver << R"(",)";
-            body << R"("progress":)" << s.progress << ",";
-            body << R"("stage":")" << s.stage << R"(")";
-            body << "}";
-
-            http_.post("/api/v1/device/ota/callback", body.str());
-            std::cout << "  [OTA Progress] " << s.stage << " " << s.progress << "%" << std::endl;
-
-            // Small delay between stages
-            std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    void simulate_events(int cyc) {
+        if(cyc==5&&status_==DeviceStatus::IDLE){
+            status_=DeviceStatus::BREWING;
+            publish_event("order_status","{\"order_id\":\"SIM-"+util::random_hex(4)+"\",\"status\":2,\"recipe_id\":\"REC-001\"}");
+            log("[Event] 开始制作");
         }
-
-        // Update firmware version
-        cfg_.firmware_ver = target_ver;
-        std::cout << "[OTA] Upgrade complete, new firmware: " << target_ver << std::endl;
+        if(cyc==6){ status_=DeviceStatus::IDLE; publish_event("order_status","{\"order_id\":\"SIM-"+util::random_hex(4)+"\",\"status\":3}"); log("[Event] 制作完成"); }
+        if(cyc==12){ status_=DeviceStatus::FAULT; publish_event("fault_alert","{\"fault_code\":3,\"fault_level\":3,\"description\":\"水泵异常(模拟)\"}"); log("[Event] 故障告警 L3"); }
+        if(cyc==16){ status_=DeviceStatus::IDLE; publish_event("fault_resolved","{\"fault_code\":3}"); log("[Event] 故障恢复"); }
     }
-
-    // ============================================================
-    // 配方同步
-    // ============================================================
-    void sync_recipes() {
-        auto resp = http_.get("/api/v1/recipes");
-        int count = 0;
-        if (resp.status == 200) {
-            // Count recipes in JSON array
-            size_t pos = 0;
-            while ((pos = resp.body.find("\"recipe_id\":\"", pos)) != std::string::npos) {
-                count++;
-                pos++;
-            }
-        }
-        std::cout << "[Recipes Sync] HTTP " << resp.status
-                  << " count=" << count << std::endl;
+    void publish_event(const std::string& type, const std::string& data) {
+        std::string b="{\"event_type\":\""+type+"\","+data.substr(1);
+        if(mqtt_&&mqtt_->is_connected())
+            mqtt_->publish(tenant_id_+"/iot/"+product_id_+"/"+device_id_+"/event/post",b);
     }
-
-    // ============================================================
-    // 拉取配置
-    // ============================================================
     void pull_config() {
-        auto resp = http_.get("/api/v1/config");
-        std::cout << "[Config Pull] HTTP " << resp.status << std::endl;
+        auto r=http_.get("/api/v1/config");
+        log("[Config] HTTP "+std::to_string(r.status));
+    }
+    void sync_recipes() {
+        auto r=http_.get("/api/v1/recipes");
+        int n=0; for(size_t p=0;(p=r.body.find("\"recipe_id\":\"",p))!=std::string::npos;p++)n++;
+        log("[Recipes] HTTP "+std::to_string(r.status)+" count="+std::to_string(n));
     }
 
     // ============================================================
-    // 工具函数
+    // 阶段4: OTA升级（MQTT通知 → HTTP下载 → MQTT上报）
     // ============================================================
-    void sleep_interval(int seconds) {
-        // Sleep in 1-second chunks to allow clean shutdown
-        for (int i = 0; i < seconds && running_; i++) {
-            std::this_thread::sleep_for(std::chrono::seconds(1));
-        }
+    void handle_ota_notify(const std::string& payload) {
+        log("\n══════ 阶段4: OTA固件升级 ══════");
+        std::string ver=util::json_get_str(payload,"version");
+        std::string url=util::json_get_str(payload,"download_url");
+        std::string csum=util::json_get_str(payload,"checksum");
+        log("[OTA] 收到升级通知: "+ver+" url="+url);
+
+        auto report=[this](const std::string& v,int p,const std::string& s){
+            std::string b="{\"version\":\""+v+"\",\"progress\":"+std::to_string(p)+",\"stage\":\""+s+"\"}";
+            mqtt_->publish(tenant_id_+"/iot/"+product_id_+"/"+device_id_+"/ota/progress",b);
+        };
+        report(ver,0,"downloading");
+
+        // HTTP下载固件
+        std::string fw_file="./firmware_dl/"+ver+".ipk";
+        std::system(("mkdir -p ./firmware_dl && curl -s -o "+fw_file+" '"+url+"'").c_str());
+        log("[OTA] 下载完成: "+fw_file);
+
+        report(ver,100,"downloading");
+        report(ver,0,"installing");
+        std::this_thread::sleep_for(std::chrono::seconds(1));
+        report(ver,100,"done");
+
+        cfg_.firmware_ver=ver;
+        log("[OTA] ✓ 升级完成! 新版本: "+ver);
+    }
+    void handle_config_set(const std::string& p) {
+        log("[Config Set] 云端下发配置: "+p.substr(0,100));
+    }
+    void handle_command(const std::string& t,const std::string& p) {
+        log("[Command] 收到指令: "+t+" → "+p);
     }
 
-    std::string now_iso() {
-        auto now = std::chrono::system_clock::now();
-        auto t = std::chrono::system_clock::to_time_t(now);
-        std::ostringstream oss;
-        oss << std::put_time(std::gmtime(&t), "%Y-%m-%dT%H:%M:%SZ");
-        return oss.str();
-    }
+    void sleep_interval(int s) { for(int i=0;i<s&&running_;i++)std::this_thread::sleep_for(std::chrono::seconds(1)); }
+    void log(const std::string& msg) { std::cout<<"[Sim] "<<msg<<std::endl; }
 
-    std::string random_hex(int bytes) {
-        static std::random_device rd;
-        static std::mt19937 gen(rd());
-        static std::uniform_int_distribution<> dis(0, 255);
-        std::ostringstream oss;
-        oss << std::hex << std::setfill('0');
-        for (int i = 0; i < bytes; i++) {
-            oss << std::setw(2) << dis(gen);
-        }
-        return oss.str();
-    }
+    enum class DeviceStatus:uint8_t{IDLE=0,BREWING=1,FAULT=2,UPGRADING=3,MAINTENANCE=4,OFFLINE=5};
 
-    std::string random_mac() {
-        static std::random_device rd;
-        static std::mt19937 gen(rd());
-        static std::uniform_int_distribution<> dis(0, 255);
-        std::ostringstream oss;
-        oss << std::hex << std::setfill('0');
-        for (int i = 0; i < 6; i++) {
-            if (i > 0) oss << ":";
-            oss << std::setw(2) << dis(gen);
-        }
-        return oss.str();
-    }
-
-    enum class DeviceStatus : uint8_t {
-        IDLE = 0, BREWING = 1, FAULT = 2, UPGRADING = 3, MAINTENANCE = 4, OFFLINE = 5
-    };
-
-    Config cfg_;
-    SimHttpClient http_;
+    Config cfg_; SimHttpClient http_; std::unique_ptr<SimMqttClient> mqtt_;
     std::atomic<bool> running_{true};
-    bool success_ = false;
-    std::string device_id_;
-    std::string tenant_id_;
-    std::string product_id_;
-    std::string token_;
-    std::string broker_uri_;
-    DeviceStatus current_status_ = DeviceStatus::IDLE;
+    std::string device_id_,tenant_id_,product_id_,token_,broker_uri_,model_code_,fw_ver_;
+    DeviceStatus status_=DeviceStatus::IDLE;
 };
-
-// ============================================================
-// 全局变量（信号处理用）
-// ============================================================
-static DeviceSimulator* g_sim = nullptr;
-
-void signal_handler(int sig) {
-    (void)sig;
-    std::cout << "\n[Sim] Signal " << sig << " received, shutting down..." << std::endl;
-    if (g_sim) g_sim->stop();
-}
-
-// ============================================================
-// 使用说明
-// ============================================================
-void print_usage(const char* prog) {
-    std::cout << "Usage: " << prog << " [OPTIONS]\n\n"
-              << "Options:\n"
-              << "  --url URL         Cloud platform URL (default: http://127.0.0.1:8080)\n"
-              << "  --tenant ID       Tenant ID (default: tenant_demo)\n"
-              << "  --model MODEL     Device model code (default: CM-2000)\n"
-              << "  --type TYPE       Device type 1=COFFEE 2=INSTANT 3=WATER 4=OTHER (default: 1)\n"
-              << "  --firmware VER    Firmware version (default: v2.0.5)\n"
-              << "  --interval SEC    Heartbeat interval seconds (default: 10)\n"
-              << "  --duration SEC    Total simulation duration, 0=forever (default: 0)\n"
-              << "  --hw-uid UID      Hardware UID (default: auto-generated)\n"
-              << "  --mac ADDR        MAC address (default: auto-generated)\n"
-              << "  --manual          Manual mode: wait for Enter between cycles\n"
-              << "  --help            Show this help\n"
-              << std::endl;
-}
 
 // ============================================================
 // Main
 // ============================================================
-int main(int argc, char* argv[]) {
-    std::signal(SIGINT, signal_handler);
-    std::signal(SIGTERM, signal_handler);
+static DeviceSimulator* g_sim=nullptr;
+void sig_handler(int s){(void)s; if(g_sim)g_sim->stop();}
 
+int main(int argc, char* argv[]) {
+    signal(SIGINT,sig_handler); signal(SIGTERM,sig_handler);
     DeviceSimulator::Config cfg;
 
-    // Parse command-line arguments
-    for (int i = 1; i < argc; i++) {
-        std::string arg = argv[i];
-        if (arg == "--url" && i + 1 < argc) {
-            cfg.cloud_url = argv[++i];
-        } else if (arg == "--tenant" && i + 1 < argc) {
-            cfg.tenant_id = argv[++i];
-        } else if (arg == "--model" && i + 1 < argc) {
-            cfg.model = argv[++i];
-        } else if (arg == "--type" && i + 1 < argc) {
-            cfg.device_type = std::stoi(argv[++i]);
-        } else if (arg == "--firmware" && i + 1 < argc) {
-            cfg.firmware_ver = argv[++i];
-        } else if (arg == "--interval" && i + 1 < argc) {
-            cfg.heartbeat_sec = std::stoi(argv[++i]);
-        } else if (arg == "--duration" && i + 1 < argc) {
-            cfg.sim_duration_sec = std::stoi(argv[++i]);
-        } else if (arg == "--hw-uid" && i + 1 < argc) {
-            cfg.hardware_uid = argv[++i];
-        } else if (arg == "--mac" && i + 1 < argc) {
-            cfg.mac_address = argv[++i];
-        } else if (arg == "--manual") {
-            cfg.auto_mode = false;
-        } else if (arg == "--help" || arg == "-h") {
-            print_usage(argv[0]);
-            return 0;
-        }
-    }
+    for(int i=1;i<argc;i++){ std::string a=argv[i];
+        if(a=="--url"&&i+1<argc) cfg.cloud_url=argv[++i];
+        else if(a=="--mqtt"&&i+1<argc) cfg.mqtt_uri=argv[++i];
+        else if(a=="--tenant"&&i+1<argc) cfg.tenant_id=argv[++i];
+        else if(a=="--model-key"&&i+1<argc) cfg.model_key=argv[++i];
+        else if(a=="--interval"&&i+1<argc) cfg.heartbeat_sec=std::stoi(argv[++i]);
+        else if(a=="--duration"&&i+1<argc) cfg.sim_duration_sec=std::stoi(argv[++i]);
+        else if(a=="--hw-uid"&&i+1<argc) cfg.hardware_uid=argv[++i];
+        else if(a=="--mac"&&i+1<argc) cfg.mac=argv[++i];
+        else if(a=="--skip-mqtt") cfg.skip_mqtt=true;
+        else if(a=="--reactivate") { std::remove("./device_creds.json"); std::cout<<"[Sim] 本地凭证已清除，将重新激活"<<std::endl; }
+        else if(a=="--help"){ std::cout<<R"(
+Usage: device_simulator [OPTIONS]
+  --url URL      云端地址 (default: http://127.0.0.1:9080)
+  --mqtt URI     MQTT Broker (default: tcp://127.0.0.1:1883)
+  --tenant ID    租户ID
+  --model-key KEY  设备型号Key(ULID, 必填)
+  --interval SEC   心跳间隔 (default: 30)
+  --duration SEC 模拟时长,0=永久
+  --skip-mqtt    纯HTTP模式(无Broker时使用)
+  --reactivate   强制重新激活(清除本地凭证)
+  --help
+)"; return 0; }
 
-    // Print banner
-    std::cout << R"(
+    std::cout<<R"(
 ╔══════════════════════════════════════════════════════╗
-║           IoT Device Simulator v1.0.0                ║
-║                                                      ║
-║  模拟一台IoT设备，通过HTTP REST API与云平台通信       ║
+║       IoT Device Simulator v2.0 (MQTT+HTTP)         ║
 ╚══════════════════════════════════════════════════════╝
-)" << std::endl;
+)"<<"  云端: "<<cfg.cloud_url<<"  MQTT: "<<cfg.mqtt_uri
+<<"  model_key: "<<cfg.model_key<<std::endl;
 
-    std::cout << "Configuration:" << std::endl;
-    std::cout << "  Cloud URL:     " << cfg.cloud_url << std::endl;
-    std::cout << "  Tenant:        " << cfg.tenant_id << std::endl;
-    std::cout << "  Model:         " << cfg.model << std::endl;
-    std::cout << "  Device Type:   " << cfg.device_type << std::endl;
-    std::cout << "  Firmware:      " << cfg.firmware_ver << std::endl;
-    std::cout << "  Heartbeat:     " << cfg.heartbeat_sec << "s" << std::endl;
-    std::cout << "  Duration:      "
-              << (cfg.sim_duration_sec == 0 ? "forever" : std::to_string(cfg.sim_duration_sec) + "s")
-              << std::endl;
-    std::cout << "  Mode:          " << (cfg.auto_mode ? "auto" : "manual") << std::endl;
-    std::cout << "  HW UID:        " << cfg.hardware_uid << std::endl;
-    std::cout << "  MAC:           " << cfg.mac_address << std::endl;
+    DeviceSimulator sim(cfg); g_sim=&sim;
 
-    // Create simulator
-    DeviceSimulator sim(cfg);
-    g_sim = &sim;
-
-    // Phase 1: Activate
-    if (!sim.activate()) {
-        std::cerr << "\n[FATAL] Device activation failed. Is the cloud platform running at "
-                  << cfg.cloud_url << " ?" << std::endl;
-        return 1;
+    // 阶段1: 激活（如果已激活则复用本地凭证）
+    if (!sim.try_load_credentials()) {
+        if (!sim.activate()) { std::cerr<<"[FATAL] 激活失败"<<std::endl; return 1; }
     }
 
-    std::cout << "\n[Sim] Device ready. device_id=" << sim.device_id()
-              << " tenant=" << sim.tenant_id() << std::endl;
+    // 阶段2: MQTT连接
+    if(!sim.connect_mqtt()){ std::cerr<<"[WARN] MQTT连接失败，使用HTTP降级模式"<<std::endl; }
 
-    if (!cfg.auto_mode) {
-        std::cout << "\n[Manual Mode] Press Enter to start simulation..." << std::endl;
-        std::cin.get();
-    }
-
-    // Phase 2: Run
+    // 阶段3+4: 运行
     sim.run();
-
-    std::cout << "\n[Sim] Simulation ended. Device " << sim.device_id()
-              << " shutting down." << std::endl;
+    std::cout<<"\n[Sim] 模拟结束 device="<<sim.device_id()<<std::endl;
     return 0;
+}
 }

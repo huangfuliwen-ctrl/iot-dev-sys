@@ -31,7 +31,9 @@ public:
                        const std::string& client_id,
                        const std::string& ca_cert_path,
                        const std::string& device_cert_path,
-                       const std::string& device_key_path);
+                       const std::string& device_key_path,
+                       const std::string& username = "",
+                       const std::string& password = "");
     StatusCode disconnect();
     bool is_connected() const;
 
