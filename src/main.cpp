@@ -134,8 +134,8 @@ int main(int argc, char* argv[]) {
     {
         namespace fs = std::filesystem;
         std::error_code ec;
-        if (fs::exists("./firmware_files", ec)) {
-            for (const auto& prod_entry : fs::directory_iterator("./firmware_files", ec)) {
+        if (fs::exists("./firmware", ec)) {
+            for (const auto& prod_entry : fs::directory_iterator("./firmware", ec)) {
                 if (!prod_entry.is_directory(ec)) continue;
                 std::string product = prod_entry.path().filename().string();
                 for (const auto& file_entry : fs::directory_iterator(prod_entry.path(), ec)) {
@@ -782,74 +782,139 @@ int main(int argc, char* argv[]) {
     // ================================================================
     // OTA API (Mock — frontend preparation)
     // ================================================================
-    // List firmwares (must be before /firmwares/{version})
+    // List firmwares — scans local ./firmware/ directory for real-time info
     api.get("/api/v1/ota/firmwares",
-        [&ota_mgr](const HttpRequest&) -> HttpResponse {
-            auto fws = ota_mgr.list_firmwares();
+        [](const HttpRequest&) -> HttpResponse {
             std::ostringstream json;
-            json << R"({"code":0,"message":"success","data":{"total":)" << fws.size()
-                 << R"(,"firmwares":[)";
-            for (size_t i = 0; i < fws.size(); i++) {
+            json << R"({"code":0,"message":"success","data":{"total":)";
+
+            std::string fw_root = "./firmware";
+            std::error_code ec;
+
+            // First pass: count total and build items
+            std::vector<std::string> items;
+            if (std::filesystem::exists(fw_root, ec)) {
+                for (const auto& prod_entry : std::filesystem::directory_iterator(fw_root, ec)) {
+                    if (!prod_entry.is_directory(ec)) continue;
+                    std::string product_id = prod_entry.path().filename().string();
+
+                    for (const auto& fw_entry : std::filesystem::directory_iterator(prod_entry.path(), ec)) {
+                        if (!fw_entry.is_regular_file(ec)) continue;
+                        std::string filename = fw_entry.path().filename().string();
+                        int64_t fsize = fw_entry.file_size(ec);
+                        std::string fw_path = fw_entry.path().string();
+
+                        std::string checksum;
+#ifdef HAS_OPENSSL
+                        std::ifstream fin(fw_path, std::ios::binary);
+                        if (fin.is_open()) {
+                            SHA256_CTX ctx; SHA256_Init(&ctx);
+                            char buf[65536];
+                            while (fin.read(buf, sizeof(buf)) || fin.gcount() > 0)
+                                SHA256_Update(&ctx, buf, fin.gcount());
+                            unsigned char hash[SHA256_DIGEST_LENGTH];
+                            SHA256_Final(hash, &ctx);
+                            std::ostringstream hex;
+                            for (int i = 0; i < SHA256_DIGEST_LENGTH; i++)
+                                hex << std::hex << std::setfill('0') << std::setw(2) << (int)hash[i];
+                            checksum = hex.str();
+                        }
+#else
+                        checksum = "size:" + std::to_string(fsize);
+#endif
+                        // File modification time as ISO 8601 (via stat for correct epoch)
+                        struct stat st;
+                        time_t tt = (::stat(fw_path.c_str(), &st) == 0)
+                                    ? st.st_mtime : 0;
+                        std::ostringstream ts;
+                        ts << std::put_time(std::gmtime(&tt), "%Y-%m-%dT%H:%M:%SZ");;
+
+                        std::ostringstream item;
+                        item << "{"
+                             << R"("version":")" << filename << R"(",)";
+                        item << R"("product_id":")" << product_id << R"(",)";
+                        item << R"("file_name":")" << filename << R"(",)";
+                        item << R"("file_size":)" << fsize << ",";
+                        item << R"("created_at":")" << ts.str() << R"(",)";
+                        item << R"("download_url":"http://127.0.0.1:9080/api/v1/ota/firmwares/download/)"
+                             << product_id << "/" << filename << R"(",)";
+                        item << R"("checksum_sha256":")" << checksum << R"(")";
+                        item << "}";
+                        items.push_back(item.str());
+                    }
+                }
+            }
+
+            json << items.size() << R"(,"firmwares":[)";
+            for (size_t i = 0; i < items.size(); i++) {
                 if (i > 0) json << ",";
-                const auto& fw = fws[i];
-                json << "{"
-                     << R"("version":")" << fw.version << R"(",)";
-                json << R"("product_id":")" << fw.product_id << R"(",)";
-                json << R"("download_url":")" << fw.download_url << R"(",)";
-                json << R"("file_name":")" << fw.file_name << R"(",)";
-                json << R"("file_size":)" << fw.file_size << ",";
-                json << R"("checksum_sha256":")" << fw.checksum_sha256 << R"(",)";
-                json << R"("changelog":")" << fw.changelog << R"(",)";
-                json << R"("force_upgrade":)" << (fw.force_upgrade ? "true" : "false") << ",";
-                json << R"("created_at":)" << fw.created_at;
-                json << "}";
+                json << items[i];
             }
             json << "]}}";
             return ApiServer::json_response(200, json.str());
         });
 
-    // Get single firmware metadata (MUST be before download route)
-    api.get("/api/v1/ota/firmwares/{version}",
-        [&ota_mgr](const HttpRequest& req) -> HttpResponse {
-            std::string ver = req.path.substr(std::string("/api/v1/ota/firmwares/").size());
-            auto fw = ota_mgr.get_firmware(ver);
-            if (!fw) return ApiServer::error_response(404, 1002, "Firmware not found: " + ver);
-            std::ostringstream json;
-            json << R"({"code":0,"message":"success","data":{)";
-            json << R"("version":")" << fw->version << R"(",)";
-            json << R"("product_id":")" << fw->product_id << R"(",)";
-            json << R"("file_name":")" << fw->file_name << R"(",)";
-            json << R"("file_size":)" << fw->file_size << ",";
-            json << R"("download_url":")" << fw->download_url << R"(",)";
-            json << R"("checksum_sha256":")" << fw->checksum_sha256 << R"(",)";
-            json << R"("changelog":")" << fw->changelog << R"(",)";
-            json << R"("force_upgrade":)" << (fw->force_upgrade ? "true" : "false") << ",";
-            json << R"("created_at":)" << fw->created_at;
-            json << "}}";
-            return ApiServer::json_response(200, json.str());
+    // Get single firmware — looks up file on disk by filename in all product dirs
+    api.get("/api/v1/ota/firmwares/{filename}",
+        [](const HttpRequest& req) -> HttpResponse {
+            std::string target = req.path.substr(std::string("/api/v1/ota/firmwares/").size());
+            // Also support ?product_id=X to narrow search
+            std::string filter_product;
+            size_t qp = req.query.find("product_id=");
+            if (qp != std::string::npos) {
+                filter_product = req.query.substr(qp + 11);
+                size_t ea = filter_product.find('&');
+                if (ea != std::string::npos) filter_product = filter_product.substr(0, ea);
+            }
+
+            std::error_code ec;
+            for (const auto& prod_entry : std::filesystem::directory_iterator("./firmware", ec)) {
+                if (!prod_entry.is_directory(ec)) continue;
+                std::string product_id = prod_entry.path().filename().string();
+                if (!filter_product.empty() && product_id != filter_product) continue;
+
+                std::string fw_path = prod_entry.path().string() + "/" + target;
+                if (std::filesystem::exists(fw_path, ec)) {
+                    int64_t fsize = std::filesystem::file_size(fw_path, ec);
+                    struct stat st;
+                    time_t tt = (::stat(fw_path.c_str(), &st) == 0) ? st.st_mtime : 0;
+                    std::ostringstream ts;
+                    ts << std::put_time(std::gmtime(&tt), "%Y-%m-%dT%H:%M:%SZ");
+
+                    // SHA256
+                    std::string checksum;
+#ifdef HAS_OPENSSL
+                    std::ifstream fin(fw_path, std::ios::binary);
+                    SHA256_CTX ctx; SHA256_Init(&ctx);
+                    char buf[65536];
+                    while (fin.read(buf, sizeof(buf)) || fin.gcount() > 0)
+                        SHA256_Update(&ctx, buf, fin.gcount());
+                    unsigned char hash[SHA256_DIGEST_LENGTH];
+                    SHA256_Final(hash, &ctx);
+                    std::ostringstream hex;
+                    for (int i = 0; i < SHA256_DIGEST_LENGTH; i++)
+                        hex << std::hex << std::setfill('0') << std::setw(2) << (int)hash[i];
+                    checksum = hex.str();
+#else
+                    checksum = "size:" + std::to_string(fsize);
+#endif
+                    std::ostringstream json;
+                    json << R"({"code":0,"message":"success","data":{)";
+                    json << R"("version":")" << target << R"(",)";
+                    json << R"("product_id":")" << product_id << R"(",)";
+                    json << R"("file_name":")" << target << R"(",)";
+                    json << R"("file_size":)" << fsize << ",";
+                    json << R"("created_at":")" << ts.str() << R"(",)";
+                    json << R"("download_url":"http://127.0.0.1:9080/api/v1/ota/firmwares/download/)"
+                         << product_id << "/" << target << R"(",)";
+                    json << R"("checksum_sha256":")" << checksum << R"(")";
+                    json << "}}";
+                    return ApiServer::json_response(200, json.str());
+                }
+            }
+            return ApiServer::error_response(404, 1002, "Firmware not found: " + target);
         });
 
-    // Download firmware binary (registered AFTER detail route)
-    api.get("/api/v1/ota/firmwares/{version}/download",
-        [&ota_mgr](const HttpRequest& req) -> HttpResponse {
-            std::string rest = req.path.substr(std::string("/api/v1/ota/firmwares/").size());
-            std::string ver = rest.substr(0, rest.find("/download"));
-            auto fw_meta = ota_mgr.get_firmware(ver);
-            std::string filename = (fw_meta && !fw_meta->file_name.empty()) ? fw_meta->file_name : (ver + ".bin");
-            std::string product = (fw_meta && !fw_meta->product_id.empty()) ? fw_meta->product_id : "default";
-            std::string fpath = "./firmware_files/" + product + "/" + filename;
-            std::ifstream file(fpath, std::ios::binary | std::ios::ate);
-            if (!file.is_open()) return ApiServer::error_response(404, 1002, "Firmware file not found: " + ver);
-            int64_t sz = file.tellg(); file.seekg(0, std::ios::beg);
-            std::string fc(sz, '\0'); file.read(&fc[0], sz); file.close();
-            static const char* b64c = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-            std::string b64; int v = 0, vb = -6;
-            for (unsigned char c : fc) { v = (v << 8) + c; vb += 8; while (vb >= 0) { b64 += b64c[(v >> vb) & 0x3F]; vb -= 6; } }
-            if (vb > -6) b64 += b64c[((v << 8) >> (vb + 8)) & 0x3F];
-            while (b64.size() % 4) b64 += '=';
-            std::ostringstream j; j << R"({"code":0,"message":"success","data":{"version":")" << ver << R"(","file_name":")" << filename << R"(","file_size":)" << sz << R"(,"file_data":")" << b64 << R"("}})";
-            return ApiServer::json_response(200, j.str());
-        });
 
     // Register firmware
     api.post("/api/v1/ota/firmwares",
@@ -880,8 +945,8 @@ int main(int argc, char* argv[]) {
                 // Use original filename, organized under product directory
                 std::string filename = fw.file_name.empty() ? (fw.version + ".bin") : fw.file_name;
                 std::string product = fw.product_id.empty() ? "default" : fw.product_id;
-                std::string dir = "./firmware_files/" + product;
-                mkdir("./firmware_files", 0755);
+                std::string dir = "./firmware/" + product;
+                mkdir("./firmware", 0755);
                 mkdir(dir.c_str(), 0755);
                 std::string fpath = dir + "/" + filename;
                 std::string decoded;
@@ -1035,7 +1100,7 @@ int main(int argc, char* argv[]) {
             if (fw && !fw->file_name.empty()) {
                 std::error_code ec;
                 std::string product = fw->product_id.empty() ? "default" : fw->product_id;
-                std::string fpath = "./firmware_files/" + product + "/" + fw->file_name;
+                std::string fpath = "./firmware/" + product + "/" + fw->file_name;
                 std::filesystem::remove(fpath, ec);
             }
             return ApiServer::json_response(200,

@@ -3,3 +3,4 @@ cloud.db
 *.o
 logs/
 firmware_files/
+firmware/
