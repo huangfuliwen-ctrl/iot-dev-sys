@@ -372,10 +372,11 @@ int main(int argc, char* argv[]) {
         });
 
     // ======== Device Types API (CRUD for frontend) ========
-    // List all types
+    // List all types (active only by default)
     api.get("/api/v1/device-types",
-        [&type_mgr](const HttpRequest&) -> HttpResponse {
-            auto types = type_mgr.list_types(false);
+        [&type_mgr](const HttpRequest& req) -> HttpResponse {
+            bool active_only = req.path.find("include_inactive=true") == std::string::npos;
+            auto types = type_mgr.list_types(active_only);
             std::ostringstream json;
             json << "{\"total\":" << types.size() << ",\"types\":[";
             for (size_t i = 0; i < types.size(); i++) {
@@ -483,7 +484,7 @@ int main(int argc, char* argv[]) {
             if (qpos != std::string::npos)
                 filter_type = req.path.substr(qpos + 11);
 
-            auto models = type_mgr.list_models(filter_type, false);
+            auto models = type_mgr.list_models(filter_type, true);
             std::ostringstream json;
             json << "{\"total\":" << models.size() << ",\"models\":[";
             for (size_t i = 0; i < models.size(); i++) {

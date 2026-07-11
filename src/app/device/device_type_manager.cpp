@@ -45,8 +45,9 @@ StatusCode DeviceTypeManager::delete_type(const std::string& type_code) {
     // Check if any models reference this type
     auto models = db_.list_device_models(type_code, true);
     if (!models.empty()) {
-        std::cerr << "[TypeMgr] Cannot delete type with active models: " << type_code << std::endl;
-        return StatusCode::ERROR;
+        std::cerr << "[TypeMgr] Cannot delete type with active models: " << type_code
+                  << " (" << models.size() << " model(s) associated)" << std::endl;
+        return StatusCode::ORG_HAS_DEVICES; // reuse: "Organization has associated devices"
     }
     return db_.delete_device_type(type_code);
 }
