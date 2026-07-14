@@ -1,6 +1,8 @@
 {
     "_comment": "云平台服务 MQTT 配置 — 特权客户端，通配符订阅所有租户设备消息",
-    "broker_uri": "tcp://127.0.0.1:1883",
+    "broker_host": "127.0.0.1",
+    "broker_port": 1883,
+    "broker_api_port": 8080,
     "client_id": "cloud-platform-service-001",
     "keep_alive_sec": 60,
     "qos": 1,

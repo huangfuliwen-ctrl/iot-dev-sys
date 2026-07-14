@@ -28,6 +28,8 @@ public:
 
     // Set TLS manager for certificate generation (optional, for mTLS)
     void set_tls_manager(TlsManager* tls);
+    // Set MQTT broker URI for activation responses
+    void set_broker_uri(const std::string& uri) { broker_uri_ = uri; }
 
     // ======== Core: process an activation request ========
     ActivationResponse process_activation(const ActivationRequest& request,
@@ -56,6 +58,7 @@ private:
 
     Database&    db_;
     TlsManager*  tls_mgr_ = nullptr;
+    std::string  broker_uri_ = "tcp://127.0.0.1:1883";
 };
 
 } // namespace dev_sys

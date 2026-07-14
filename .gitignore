@@ -5,3 +5,4 @@ logs/
 firmware_files/
 firmware/
 device_creds.json
+mqtt_tenant_key.txt

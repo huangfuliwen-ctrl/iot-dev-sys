@@ -4,8 +4,87 @@
 #include <sstream>
 #include <iomanip>
 #include <chrono>
+#include <cstdlib>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <unistd.h>
+#include <netdb.h>
+#include <cstring>
 
 namespace dev_sys {
+
+// ============================================================
+// 同步租户到 MQTT Broker
+// ============================================================
+static void sync_tenant_to_broker(const std::string& tenant_id) {
+    const char* api_url = std::getenv("MQTT_BROKER_API");
+    if (!api_url || !api_url[0]) return; // not configured, skip
+
+    std::string url(api_url);
+    // Parse host:port from http://host:port
+    std::string host = "127.0.0.1"; int port = 8080;
+    if (url.find("http://") == 0) url = url.substr(7);
+    size_t c = url.find(':'); size_t s = url.find('/');
+    host = (c != std::string::npos) ? url.substr(0, c) : url.substr(0, s);
+    if (c != std::string::npos) port = std::stoi(url.substr(c + 1, s - c - 1));
+
+    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) return;
+    timeval tv{3, 0}; setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+
+    addrinfo h{}, *res;
+    h.ai_family = AF_INET; h.ai_socktype = SOCK_STREAM;
+    if (getaddrinfo(host.c_str(), std::to_string(port).c_str(), &h, &res) != 0) {
+        close(fd); return;
+    }
+    sockaddr_in a{}; memcpy(&a, res->ai_addr, sizeof(a)); freeaddrinfo(res);
+    if (connect(fd, (sockaddr*)&a, sizeof(a)) < 0) { close(fd); return; }
+
+    std::string body = "{\"tenant_id\":\"" + tenant_id + "\"}";
+    std::ostringstream req;
+    req << "PUT /api/v1/tenants/" << tenant_id << " HTTP/1.1\r\n"
+        << "Host: " << host << ":" << port << "\r\n"
+        << "Content-Type: application/json\r\n"
+        << "Content-Length: " << body.size() << "\r\n"
+        << "Connection: close\r\n\r\n" << body;
+    std::string rs = req.str();
+    send(fd, rs.c_str(), rs.size(), 0);
+
+    char buf[4096]; recv(fd, buf, sizeof(buf) - 1, 0);
+    close(fd);
+    std::cout << "[OrgMgr] Synced tenant '" << tenant_id << "' to MQTT broker " << host << ":" << port << std::endl;
+}
+
+static void delete_tenant_from_broker(const std::string& tenant_id) {
+    const char* api_url = std::getenv("MQTT_BROKER_API");
+    if (!api_url || !api_url[0]) return;
+    std::string url(api_url); if (url.find("http://") == 0) url = url.substr(7);
+    std::string host = "127.0.0.1"; int port = 8080;
+    size_t c = url.find(':'); size_t s = url.find('/');
+    host = (c != std::string::npos) ? url.substr(0, c) : url.substr(0, s);
+    if (c != std::string::npos) port = std::stoi(url.substr(c + 1, s - c - 1));
+
+    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) return;
+    timeval tv{3, 0}; setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+    addrinfo h{}, *res; h.ai_family = AF_INET; h.ai_socktype = SOCK_STREAM;
+    if (getaddrinfo(host.c_str(), std::to_string(port).c_str(), &h, &res) != 0) { close(fd); return; }
+    sockaddr_in a{}; memcpy(&a, res->ai_addr, sizeof(a)); freeaddrinfo(res);
+    if (connect(fd, (sockaddr*)&a, sizeof(a)) < 0) { close(fd); return; }
+
+    std::ostringstream req;
+    req << "DELETE /api/v1/tenants/" << tenant_id << " HTTP/1.1\r\n"
+        << "Host: " << host << ":" << port << "\r\n"
+        << "Connection: close\r\n\r\n";
+    std::string rs = req.str();
+    send(fd, rs.c_str(), rs.size(), 0);
+    char buf[4096]; recv(fd, buf, sizeof(buf) - 1, 0);
+    close(fd);
+    std::cout << "[OrgMgr] Deleted tenant '" << tenant_id << "' from MQTT broker" << std::endl;
+}
 
 OrgManager::OrgManager() = default;
 OrgManager::~OrgManager() = default;
@@ -66,6 +145,7 @@ StatusCode OrgManager::create_org(OrgInfo& info) {
     std::cout << "[OrgMgr] Created org: " << info.org_name
               << " (id=" << info.org_id << " tenant=" << info.tenant_id
               << " path=" << info.path << ")" << std::endl;
+    sync_tenant_to_broker(info.tenant_id);
     return StatusCode::OK;
 }
 
@@ -106,6 +186,7 @@ StatusCode OrgManager::delete_org(int32_t org_id) {
 
     // Soft delete
     it->is_active = false;
+    delete_tenant_from_broker(it->tenant_id);
     return StatusCode::OK;
 }
 

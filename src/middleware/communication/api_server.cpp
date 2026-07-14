@@ -40,7 +40,10 @@ void ApiServer::del(const std::string& p, RouteHandler h)  { add_route("DELETE",
 StatusCode ApiServer::start(int port) {
     impl_->port = port;
     impl_->server_fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (impl_->server_fd < 0) return StatusCode::COMM_DISCONNECTED;
+    if (impl_->server_fd < 0) {
+        std::cerr << "[ApiServer] socket() failed: " << strerror(errno) << std::endl;
+        return StatusCode::COMM_DISCONNECTED;
+    }
 
     int opt = 1;
     setsockopt(impl_->server_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
@@ -50,10 +53,12 @@ StatusCode ApiServer::start(int port) {
     addr.sin_addr.s_addr = INADDR_ANY;
     addr.sin_port = htons(port);
     if (bind(impl_->server_fd, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
+        std::cerr << "[ApiServer] bind(" << port << ") failed: " << strerror(errno) << std::endl;
         close(impl_->server_fd);
         return StatusCode::COMM_DISCONNECTED;
     }
     if (listen(impl_->server_fd, SOMAXCONN) < 0) {
+        std::cerr << "[ApiServer] listen() failed: " << strerror(errno) << std::endl;
         close(impl_->server_fd);
         return StatusCode::COMM_DISCONNECTED;
     }

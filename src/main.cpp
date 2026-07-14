@@ -13,6 +13,9 @@
 #include <filesystem>
 #include <vector>
 #include <regex>
+#include <sys/socket.h>
+#include <netdb.h>
+#include <cstring>
 
 #ifdef HAS_OPENSSL
 #include <openssl/sha.h>
@@ -91,6 +94,37 @@ int main(int argc, char* argv[]) {
     LogManager log_mgr;
     log_mgr.init("./logs", LogManager::Level::INFO);
     std::filesystem::create_directories("./firmware");
+
+    // Load MQTT config (broker host/port/api from mqtt_config.json)
+    std::string broker_host = "127.0.0.1";
+    int broker_port = 1883, broker_api_port = 8080;
+    {
+        std::ifstream cf("./config/mqtt_config.json");
+        if (cf.is_open()) {
+            std::string j((std::istreambuf_iterator<char>(cf)), std::istreambuf_iterator<char>());
+            auto jg = [&j](const std::string& k) -> std::string {
+                auto p = j.find("\"" + k + "\":");
+                if (p == std::string::npos) return "";
+                p += k.size() + 3;
+                while (p < j.size() && (j[p] == ' ' || j[p] == '\t')) p++;
+                if (p < j.size() && j[p] == '"') { p++; auto e = j.find('"', p); return j.substr(p, e - p); }
+                auto e = j.find_first_of(",}\n\r \t", p);
+                return j.substr(p, e - p);
+            };
+            auto ji = [&j, &jg](const std::string& k, int d) -> int {
+                auto s = jg(k); return s.empty() ? d : std::stoi(s);
+            };
+            broker_host = jg("broker_host"); if (broker_host.empty()) broker_host = "127.0.0.1";
+            broker_port = ji("broker_port", 1883);
+            broker_api_port = ji("broker_api_port", 8080);
+            std::cout << "[Main] MQTT broker: " << broker_host << ":" << broker_port
+                      << "  API: " << broker_host << ":" << broker_api_port << std::endl;
+        }
+    }
+    auto mqtt_broker_uri = std::make_shared<std::string>(
+        "tcp://" + broker_host + ":" + std::to_string(broker_port));
+    auto mqtt_broker_api = std::make_shared<std::string>(
+        "http://" + broker_host + ":" + std::to_string(broker_api_port));
 
     Database db;
     // PostgreSQL connection string (libpq format)
@@ -178,6 +212,7 @@ int main(int argc, char* argv[]) {
     // ======== Phase 2.5: HTTP API Server + Device Activation (REQ-DM-002) ========
     DeviceActivation activation(db);
     activation.set_tls_manager(&tls_mgr);
+    activation.set_broker_uri(*mqtt_broker_uri);
 
     DeviceTypeManager type_mgr(db);
 
@@ -923,7 +958,7 @@ int main(int argc, char* argv[]) {
                         item << R"("file_name":")" << filename << R"(",)";
                         item << R"("file_size":)" << fsize << ",";
                         item << R"("created_at":")" << ts.str() << R"(",)";
-                        item << R"("download_url":"http://127.0.0.1:9080/api/v1/ota/firmwares/download/)"
+                        item << R"("download_url":"http://127.0.0.1:9081/api/v1/ota/firmwares/download/)"
                              << product_id << "/" << filename << R"(",)";
                         item << R"("checksum_sha256":")" << checksum << R"(")";
                         item << "}";
@@ -1041,7 +1076,7 @@ int main(int argc, char* argv[]) {
             json << R"("version_minor":)" << best_minor << ",";
             json << R"("version_patch":)" << best_patch << ",";
             json << R"("created_at":")" << ts.str() << R"(",)";
-            json << R"("download_url":"http://127.0.0.1:9080/api/v1/ota/firmwares/download/)"
+            json << R"("download_url":"http://127.0.0.1:9081/api/v1/ota/firmwares/download/)"
                  << product_id << "/" << best_file << R"(",)";
             json << R"("checksum_sha256":")" << checksum << R"(")";
             json << "}}";
@@ -1099,7 +1134,7 @@ int main(int argc, char* argv[]) {
                     json << R"("file_name":")" << target << R"(",)";
                     json << R"("file_size":)" << fsize << ",";
                     json << R"("created_at":")" << ts.str() << R"(",)";
-                    json << R"("download_url":"http://127.0.0.1:9080/api/v1/ota/firmwares/download/)"
+                    json << R"("download_url":"http://127.0.0.1:9081/api/v1/ota/firmwares/download/)"
                          << product_id << "/" << target << R"(",)";
                     json << R"("checksum_sha256":")" << checksum << R"(")";
                     json << "}}";
@@ -1533,13 +1568,15 @@ int main(int argc, char* argv[]) {
 
     // Get tenant detail — uses OrgManager + DeviceManager
     api.get("/api/v1/tenants/{tenant_id}",
-        [&org_mgr, &device_mgr](const HttpRequest& req) -> HttpResponse {
+        [&org_mgr, &device_mgr, &db](const HttpRequest& req) -> HttpResponse {
             std::string tenant_id = req.path.substr(std::string("/api/v1/tenants/").size());
             if (tenant_id.find('/') != std::string::npos) {
                 return ApiServer::error_response(404, 1002, "Not found: " + req.path);
             }
             auto org = org_mgr.get_org_by_tenant(tenant_id);
             int count = device_mgr.device_count(tenant_id);
+            int online = device_mgr.list_devices(tenant_id).size() -
+                device_mgr.list_offline_devices().size();
             std::ostringstream json;
             json << R"({"code":0,"message":"success","data":{)";
             json << R"("tenant_id":")" << tenant_id << R"(",)";
@@ -1548,12 +1585,19 @@ int main(int argc, char* argv[]) {
                      << R"("org_name":")" << org->org_name << R"(",)";
                 json << R"("org_type":")" << org->org_type << R"(",)";
                 json << R"("parent_id":)" << org->parent_id << ","
-                     << R"("contact_name":")" << org->contact_name << R"(",)";
+                     << R"("level":)" << org->level << ","
+                     << R"("path":")" << org->path << R"(",)";
+                json << R"("contact_name":")" << org->contact_name << R"(",)";
                 json << R"("contact_phone":")" << org->contact_phone << R"(",)";
                 json << R"("contact_email":")" << org->contact_email << R"(",)";
+                json << R"("address":")" << org->address << R"(",)";
+                json << R"("is_active":)" << (org->is_active ? "true" : "false") << ",";
+            } else {
+                json << R"("org_id":0,"org_name":"","org_type":"")";
+                json << R"(,"is_active":true,)";
             }
             json << R"("device_count":)" << count << ",";
-            json << R"("online_count":)" << (count > 0 ? count - 1 : 0);
+            json << R"("online_count":)" << (online > 0 ? online : 0);
             json << "}}";
             return ApiServer::json_response(200, json.str());
         });
@@ -1592,12 +1636,13 @@ int main(int argc, char* argv[]) {
 
     // Get service config
     api.get("/api/v1/config",
-        [](const HttpRequest&) -> HttpResponse {
+        [mqtt_broker_uri, mqtt_broker_api](const HttpRequest&) -> HttpResponse {
             std::ostringstream json;
             json << R"({"code":0,"message":"success","data":{)";
             json << R"("service_name":"dev-sys-cloud",)";
             json << R"("version":"1.0.0",)";
-            json << R"("mqtt_broker_uri":"ssl://mqtt.example.com:8883",)";
+            json << R"("mqtt_broker_uri":")" << *mqtt_broker_uri << R"(",)";
+    json << R"("mqtt_broker_api":")" << *mqtt_broker_api << R"(",)";
             json << R"("mqtt_client_id":"cloud-platform-service-001",)";
             json << R"("heartbeat_timeout_sec":180,)";
             json << R"("offline_check_interval_sec":30,)";
@@ -1620,6 +1665,155 @@ int main(int argc, char* argv[]) {
             json << "}}";
             (void)req; // mock: accept but don't actually change
             return ApiServer::json_response(200, json.str());
+        });
+
+    // ---- MQTT Tenant Key management (stored in ./mqtt_tenant_key.txt) ----
+    auto load_tenant_key = []() -> std::string {
+        std::ifstream f("./mqtt_tenant_key.txt");
+        if (!f.is_open()) return "";
+        std::string k; std::getline(f, k); return k;
+    };
+    auto save_tenant_key = [](const std::string& k) {
+        std::ofstream f("./mqtt_tenant_key.txt", std::ios::trunc);
+        if (f.is_open()) f << k;
+    };
+
+    api.get("/api/v1/mqtt-tenant-key",
+        [&load_tenant_key](const HttpRequest&) -> HttpResponse {
+            std::string k = load_tenant_key();
+            std::ostringstream j;
+            j << R"({"code":0,"message":"success","data":{"tenant_key":)"
+              << (k.empty() ? "null" : "\"" + k + "\"") << "}}";
+            return ApiServer::json_response(200, j.str());
+        });
+
+    api.put("/api/v1/mqtt-tenant-key",
+        [&save_tenant_key](const HttpRequest& req) -> HttpResponse {
+            std::string k = JsonHelper::get_string(req.body, "tenant_key");
+            if (k.empty()) return ApiServer::error_response(400, 1001, "tenant_key required");
+            save_tenant_key(k);
+            return ApiServer::json_response(200,
+                R"({"code":0,"message":"success","data":{"updated":true}})");
+        });
+
+    api.del("/api/v1/mqtt-tenant-key",
+        [&save_tenant_key](const HttpRequest&) -> HttpResponse {
+            save_tenant_key("");
+            return ApiServer::json_response(200,
+                R"({"code":0,"message":"success","data":{"deleted":true}})");
+        });
+
+    // Verify mqtt tenant key (frontend uses this path)
+    api.get("/api/v1/mqtt-tenant-key/verify",
+        [mqtt_broker_api](const HttpRequest& req) -> HttpResponse {
+            auto qp = [&req](const std::string& k) -> std::string {
+                std::string s = k + "=";
+                size_t p = req.query.find(s); if (p == std::string::npos) return "";
+                p += s.size(); size_t e = req.query.find('&', p);
+                if (e == std::string::npos) e = req.query.size();
+                return req.query.substr(p, e - p);
+            };
+            std::string key = qp("key");
+            if (key.empty())
+                return ApiServer::json_response(200,
+                    R"({"code":0,"message":"success","data":{"valid":false,"tenant_name":null}})");
+
+            std::string api_url = *mqtt_broker_api;
+            if (api_url.empty()) {
+                return ApiServer::json_response(200,
+                    R"({"code":0,"message":"success","data":{"valid":false,"tenant_name":null}})");
+            }
+
+            std::string host = "127.0.0.1"; int port = 8080;
+            std::string url(api_url); if (url.find("http://") == 0) url = url.substr(7);
+            size_t c = url.find(':'); size_t s = url.find('/');
+            host = (c != std::string::npos) ? url.substr(0, c) : url.substr(0, s);
+            if (c != std::string::npos) port = std::stoi(url.substr(c + 1, s - c - 1));
+
+            int fd = socket(AF_INET, SOCK_STREAM, 0); if (fd < 0)
+                return ApiServer::json_response(200,
+                    R"({"code":0,"message":"success","data":{"valid":false,"tenant_name":null}})");
+            timeval tv{3, 0}; setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+            setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+            addrinfo h{}, *res; h.ai_family = AF_INET; h.ai_socktype = SOCK_STREAM;
+            if (getaddrinfo(host.c_str(), std::to_string(port).c_str(), &h, &res) != 0) {
+                close(fd); return ApiServer::json_response(200,
+                    R"({"code":0,"message":"success","data":{"valid":false,"tenant_name":null}})");
+            }
+            sockaddr_in a{}; memcpy(&a, res->ai_addr, sizeof(a)); freeaddrinfo(res);
+            if (connect(fd, (sockaddr*)&a, sizeof(a)) < 0) { close(fd);
+                return ApiServer::json_response(200,
+                    R"({"code":0,"message":"success","data":{"valid":false,"tenant_name":null}})");
+            }
+            std::ostringstream rs; rs << "GET /api/v1/tenant/info?key=" << key << " HTTP/1.1\r\n"
+               << "Host: " << host << ":" << port << "\r\nConnection: close\r\n\r\n";
+            std::string rss = rs.str(); send(fd, rss.c_str(), rss.size(), 0);
+            char buf[4096]; auto n = recv(fd, buf, sizeof(buf) - 1, 0); close(fd);
+            if (n <= 0) return ApiServer::json_response(200,
+                    R"({"code":0,"message":"success","data":{"valid":false,"tenant_name":null}})");
+            buf[n] = 0; std::string raw(buf, n);
+            size_t bs = raw.find("\r\n\r\n");
+            if (bs == std::string::npos) return ApiServer::json_response(200,
+                    R"({"code":0,"message":"success","data":{"valid":false,"tenant_name":null}})");
+            std::string body = raw.substr(bs + 4);
+
+            // Extract tenant_id from mqtt_broker response
+            // Response: {"code":0,"data":{"tenant_id":"xxx","tenant_key":"...",...}}
+            std::string tid = JsonHelper::get_string(body, "tenant_id");
+            bool valid = !tid.empty();
+            std::ostringstream j;
+            j << R"({"code":0,"message":"success","data":{"valid":)" << (valid ? "true" : "false")
+              << R"(,"tenant_name":")" << tid << R"("}})";
+            return ApiServer::json_response(200, j.str());
+        });
+
+    // Lookup tenant name by tenant_key (proxies to mqtt_broker)
+    api.get("/api/v1/tenants/by-key",
+        [mqtt_broker_api](const HttpRequest& req) -> HttpResponse {
+            auto qp = [&req](const std::string& k) -> std::string {
+                std::string s = k + "=";
+                size_t p = req.query.find(s); if (p == std::string::npos) return "";
+                p += s.size(); size_t e = req.query.find('&', p);
+                if (e == std::string::npos) e = req.query.size();
+                return req.query.substr(p, e - p);
+            };
+            std::string key = qp("key");
+            if (key.empty())
+                return ApiServer::error_response(400, 1001, "key is required");
+
+            std::string api_url = *mqtt_broker_api;
+            if (api_url.empty())
+                return ApiServer::error_response(503, 2000, "MQTT broker API not configured");
+
+            // Proxy to mqtt_broker: GET /api/v1/tenant/info?key=xxx
+            std::string host = "127.0.0.1"; int port = 8080;
+            std::string url(api_url); if (url.find("http://") == 0) url = url.substr(7);
+            size_t c = url.find(':'); size_t s = url.find('/');
+            host = (c != std::string::npos) ? url.substr(0, c) : url.substr(0, s);
+            if (c != std::string::npos) port = std::stoi(url.substr(c + 1, s - c - 1));
+
+            int fd = socket(AF_INET, SOCK_STREAM, 0); if (fd < 0)
+                return ApiServer::error_response(500, 2000, "socket failed");
+            timeval tv{5, 0}; setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+            setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+            addrinfo h{}, *res; h.ai_family = AF_INET; h.ai_socktype = SOCK_STREAM;
+            if (getaddrinfo(host.c_str(), std::to_string(port).c_str(), &h, &res) != 0) {
+                close(fd); return ApiServer::error_response(502, 2000, "mqtt_broker unreachable");
+            }
+            sockaddr_in a{}; memcpy(&a, res->ai_addr, sizeof(a)); freeaddrinfo(res);
+            if (connect(fd, (sockaddr*)&a, sizeof(a)) < 0) {
+                close(fd); return ApiServer::error_response(502, 2000, "mqtt_broker connect failed");
+            }
+            std::ostringstream rs; rs << "GET /api/v1/tenant/info?key=" << key << " HTTP/1.1\r\n"
+               << "Host: " << host << ":" << port << "\r\nConnection: close\r\n\r\n";
+            std::string rss = rs.str(); send(fd, rss.c_str(), rss.size(), 0);
+            char buf[8192]; auto n = recv(fd, buf, sizeof(buf) - 1, 0); close(fd);
+            if (n <= 0) return ApiServer::error_response(502, 2000, "mqtt_broker no response");
+            buf[n] = 0; std::string raw(buf, n);
+            size_t bs = raw.find("\r\n\r\n");
+            if (bs == std::string::npos) return ApiServer::error_response(502, 2000, "bad response");
+            std::string body = raw.substr(bs + 4);
+            return ApiServer::json_response(200, body);
         });
 
     // ================================================================
@@ -2020,8 +2214,13 @@ int main(int argc, char* argv[]) {
                 + std::to_string(account_id) + R"(,"deleted":true}})");
         });
 
-    if (api.start(9080) != StatusCode::OK) {
-        std::cerr << "[Main] API server start failed" << std::endl;
+    int api_port = 9080;
+    const char* env_port = std::getenv("API_PORT");
+    if (env_port) api_port = std::stoi(env_port);
+    char api_base[64];
+    snprintf(api_base, sizeof(api_base), "http://127.0.0.1:%d", api_port);
+    if (api.start(api_port) != StatusCode::OK) {
+        std::cerr << "[Main] API server start failed on port " << api_port << std::endl;
         return 1;
     }
 
@@ -2049,8 +2248,7 @@ int main(int argc, char* argv[]) {
         1);
 
     ServiceConfig svc_config;
-    const char* mqtt_uri = std::getenv("MQTT_BROKER_URI");
-    svc_config.mqtt_broker_uri = mqtt_uri ? mqtt_uri : "tcp://127.0.0.1:1883";
+    svc_config.mqtt_broker_uri = *mqtt_broker_uri;
     svc_config.mqtt_client_id  = "cloud-platform-service-001";
 
     if (mqtt.connect(svc_config.mqtt_broker_uri,

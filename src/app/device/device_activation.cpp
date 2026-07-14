@@ -6,6 +6,7 @@
 #include <iomanip>
 #include <chrono>
 #include <random>
+#include <cstdlib>
 
 #ifdef HAS_OPENSSL
 #include <openssl/sha.h>
@@ -112,7 +113,7 @@ ActivationResponse DeviceActivation::process_activation(const ActivationRequest&
     resp.device_type = dtype->type_code;
     resp.firmware_version = model->firmware_base;
     resp.activation_token = token;
-    resp.mqtt_broker_uri = "ssl://mqtt.example.com:8883";
+    resp.mqtt_broker_uri = broker_uri_;
     resp.ttl_seconds = static_cast<int32_t>(ttl);
 
     std::cout << "[Activation] Device activated: " << device_id
