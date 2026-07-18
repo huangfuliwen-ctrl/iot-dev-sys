@@ -1996,8 +1996,12 @@ int main(int argc, char* argv[]) {
             info.contact_phone = JsonHelper::get_string(req.body, "contact_phone");
             info.contact_email = JsonHelper::get_string(req.body, "contact_email");
             info.address       = JsonHelper::get_string(req.body, "address");
-            if (info.tenant_id.empty() || info.org_name.empty())
-                return ApiServer::error_response(400, 1001, "tenant_id and org_name are required");
+            if (info.tenant_id.empty()) {
+                // Auto-generate tenant_id from org_name
+                info.tenant_id = info.org_name;
+            }
+            if (info.org_name.empty())
+                return ApiServer::error_response(400, 1001, "org_name is required");
             StatusCode sc = org_mgr.create_org(info);
             if (sc != StatusCode::OK)
                 return ApiServer::error_response(400, static_cast<int>(sc), status_message(sc));
