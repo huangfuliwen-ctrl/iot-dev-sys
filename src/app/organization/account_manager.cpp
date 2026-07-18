@@ -1,4 +1,5 @@
 #include "account_manager.h"
+#include "../../middleware/storage/database.h"
 #include <algorithm>
 #include <iostream>
 #include <sstream>
@@ -72,6 +73,21 @@ AccountManager::AccountManager(OrgManager* org_mgr)
 
 AccountManager::~AccountManager() = default;
 
+StatusCode AccountManager::load_from_database() {
+    if (!db_) return StatusCode::STORAGE_READ_ERROR;
+    auto db_accounts = db_->list_accounts_db();
+    if (db_accounts.empty()) return StatusCode::OK;
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    int32_t max_id = 0;
+    for (const auto& a : db_accounts) {
+        accounts_.push_back(a);
+        if (a.account_id > max_id) max_id = a.account_id;
+    }
+    next_id_ = max_id + 1;
+    std::cout << "[AcctMgr] Loaded " << accounts_.size() << " accounts from database" << std::endl;
+    return StatusCode::OK;
+}
+
 // ============================================================
 // CRUD
 // ============================================================
@@ -108,6 +124,7 @@ StatusCode AccountManager::create_account(AccountInfo& info, const std::string& 
     if (org) info.org_name = org->org_name;
 
     accounts_.push_back(info);
+    if (db_) db_->insert_account(info);
     std::cout << "[AcctMgr] Created account: " << info.username
               << " (id=" << info.account_id << " role=" << info.role_code << ")" << std::endl;
     return StatusCode::OK;
@@ -131,6 +148,8 @@ StatusCode AccountManager::update_account(int32_t account_id, const AccountInfo&
     std::ostringstream ts;
     ts << std::put_time(std::gmtime(&t), "%Y-%m-%dT%H:%M:%SZ");
     it->updated_at = ts.str();
+
+    if (db_) db_->update_account_db(*it);
 
     return StatusCode::OK;
 }
@@ -160,6 +179,7 @@ StatusCode AccountManager::delete_account(int32_t account_id) {
 
     // Soft delete (deactivate)
     it->is_active = false;
+    if (db_) db_->update_account_db(*it);
     return StatusCode::OK;
 }
 

@@ -147,6 +147,8 @@ StatusCode Database::init_schema() {
     sc = create_recipes_table();          if (sc != StatusCode::OK) return sc;
     sc = create_faults_table();           if (sc != StatusCode::OK) return sc;
     sc = create_firmwares_table();        if (sc != StatusCode::OK) return sc;
+    sc = create_organizations_table();    if (sc != StatusCode::OK) return sc;
+    sc = create_accounts_table();         if (sc != StatusCode::OK) return sc;
     return StatusCode::OK;
 }
 
@@ -345,6 +347,52 @@ StatusCode Database::create_firmwares_table() {
             changelog       TEXT NOT NULL DEFAULT '',
             force_upgrade   BOOLEAN NOT NULL DEFAULT FALSE,
             created_at      BIGINT NOT NULL DEFAULT 0
+        );
+    )";
+    return execute(sql);
+}
+
+StatusCode Database::create_organizations_table() {
+    const char* sql = R"(
+        CREATE TABLE IF NOT EXISTS organizations (
+            id              SERIAL PRIMARY KEY,
+            org_id          INTEGER NOT NULL UNIQUE,
+            parent_id       INTEGER NOT NULL DEFAULT 0,
+            tenant_id       TEXT NOT NULL UNIQUE,
+            org_name        TEXT NOT NULL,
+            org_type        TEXT NOT NULL DEFAULT 'department',
+            contact_name    TEXT NOT NULL DEFAULT '',
+            contact_phone   TEXT NOT NULL DEFAULT '',
+            contact_email   TEXT NOT NULL DEFAULT '',
+            address         TEXT NOT NULL DEFAULT '',
+            is_active       BOOLEAN NOT NULL DEFAULT TRUE,
+            level           INTEGER NOT NULL DEFAULT 0,
+            path            TEXT NOT NULL DEFAULT '',
+            children_count  INTEGER NOT NULL DEFAULT 0,
+            created_at      TEXT NOT NULL DEFAULT '',
+            updated_at      TEXT NOT NULL DEFAULT ''
+        );
+    )";
+    return execute(sql);
+}
+
+StatusCode Database::create_accounts_table() {
+    const char* sql = R"(
+        CREATE TABLE IF NOT EXISTS accounts (
+            id              SERIAL PRIMARY KEY,
+            account_id      INTEGER NOT NULL UNIQUE,
+            username        TEXT NOT NULL UNIQUE,
+            display_name    TEXT NOT NULL DEFAULT '',
+            password_hash   TEXT NOT NULL DEFAULT '',
+            role_code       TEXT NOT NULL DEFAULT 'viewer',
+            org_id          INTEGER NOT NULL DEFAULT 0,
+            org_name        TEXT NOT NULL DEFAULT '',
+            email           TEXT NOT NULL DEFAULT '',
+            phone           TEXT NOT NULL DEFAULT '',
+            is_active       BOOLEAN NOT NULL DEFAULT TRUE,
+            last_login_at   TEXT NOT NULL DEFAULT '',
+            created_at      TEXT NOT NULL DEFAULT '',
+            updated_at      TEXT NOT NULL DEFAULT ''
         );
     )";
     return execute(sql);
@@ -571,6 +619,46 @@ FirmwareVersion Database::firmware_from_row(const std::vector<std::string>& row)
     fw.force_upgrade   = (row[6] == "t" || row[6] == "true" || row[6] == "TRUE" || row[6] == "1");
     fw.created_at      = std::stoll(row[7]);
     return fw;
+}
+
+OrgInfo Database::org_from_row(const std::vector<std::string>& row) const {
+    OrgInfo info;
+    if (row.size() < 15) return info;
+    info.org_id        = std::stoi(row[1]);
+    info.parent_id     = std::stoi(row[2]);
+    info.tenant_id     = row[3];
+    info.org_name      = row[4];
+    info.org_type      = row[5];
+    info.contact_name  = row[6];
+    info.contact_phone = row[7];
+    info.contact_email = row[8];
+    info.address       = row[9];
+    info.is_active     = (row[10] == "t" || row[10] == "true" || row[10] == "TRUE" || row[10] == "1");
+    info.level         = std::stoi(row[11]);
+    info.path          = row[12];
+    info.children_count = std::stoi(row[13]);
+    info.created_at    = row[14];
+    info.updated_at    = row[15];
+    return info;
+}
+
+AccountInfo Database::account_from_row(const std::vector<std::string>& row) const {
+    AccountInfo info;
+    if (row.size() < 13) return info;
+    info.account_id    = std::stoi(row[1]);
+    info.username      = row[2];
+    info.display_name  = row[3];
+    info.password_hash = row[4];
+    info.role_code     = row[5];
+    info.org_id        = std::stoi(row[6]);
+    info.org_name      = row[7];
+    info.email         = row[8];
+    info.phone         = row[9];
+    info.is_active     = (row[10] == "t" || row[10] == "true" || row[10] == "TRUE" || row[10] == "1");
+    info.last_login_at = row[11];
+    info.created_at    = row[12];
+    info.updated_at    = row[13];
+    return info;
 }
 
 // ============================================================
@@ -1012,6 +1100,104 @@ std::vector<FirmwareVersion> Database::list_all_firmwares() {
     std::vector<std::vector<std::string>> rows;
     query("SELECT * FROM firmwares ORDER BY id DESC", rows);
     for (const auto& row : rows) result.push_back(firmware_from_row(row));
+    return result;
+}
+
+// ============================================================
+// Organizations CRUD
+// ============================================================
+StatusCode Database::insert_org(const OrgInfo& info) {
+    std::ostringstream sql;
+    sql << "INSERT INTO organizations "
+        << "(org_id,parent_id,tenant_id,org_name,org_type,contact_name,contact_phone,contact_email,address,is_active,level,path,children_count,created_at,updated_at) VALUES ("
+        << info.org_id << "," << info.parent_id << ","
+        << sql_str(info.tenant_id) << "," << sql_str(info.org_name) << ","
+        << sql_str(info.org_type) << "," << sql_str(info.contact_name) << ","
+        << sql_str(info.contact_phone) << "," << sql_str(info.contact_email) << ","
+        << sql_str(info.address) << "," << sql_bool(info.is_active) << ","
+        << info.level << "," << sql_str(info.path) << ","
+        << info.children_count << "," << sql_str(info.created_at) << ","
+        << sql_str(info.updated_at) << ")";
+    return execute(sql.str());
+}
+
+StatusCode Database::update_org_db(const OrgInfo& info) {
+    std::ostringstream sql;
+    sql << "UPDATE organizations SET "
+        << "parent_id=" << info.parent_id << ","
+        << "tenant_id=" << sql_str(info.tenant_id) << ","
+        << "org_name=" << sql_str(info.org_name) << ","
+        << "org_type=" << sql_str(info.org_type) << ","
+        << "contact_name=" << sql_str(info.contact_name) << ","
+        << "contact_phone=" << sql_str(info.contact_phone) << ","
+        << "contact_email=" << sql_str(info.contact_email) << ","
+        << "address=" << sql_str(info.address) << ","
+        << "is_active=" << sql_bool(info.is_active) << ","
+        << "level=" << info.level << ","
+        << "path=" << sql_str(info.path) << ","
+        << "children_count=" << info.children_count << ","
+        << "updated_at=" << sql_str(info.updated_at)
+        << " WHERE org_id=" << info.org_id;
+    return execute(sql.str());
+}
+
+StatusCode Database::delete_org_db(int32_t org_id) {
+    std::ostringstream sql;
+    sql << "DELETE FROM organizations WHERE org_id=" << org_id;
+    return execute(sql.str());
+}
+
+std::vector<OrgInfo> Database::list_orgs_db() {
+    std::vector<OrgInfo> result;
+    std::vector<std::vector<std::string>> rows;
+    query("SELECT * FROM organizations ORDER BY org_id ASC", rows);
+    for (const auto& row : rows) result.push_back(org_from_row(row));
+    return result;
+}
+
+// ============================================================
+// Accounts CRUD
+// ============================================================
+StatusCode Database::insert_account(const AccountInfo& info) {
+    std::ostringstream sql;
+    sql << "INSERT INTO accounts "
+        << "(account_id,username,display_name,password_hash,role_code,org_id,org_name,email,phone,is_active,last_login_at,created_at,updated_at) VALUES ("
+        << info.account_id << "," << sql_str(info.username) << ","
+        << sql_str(info.display_name) << "," << sql_str(info.password_hash) << ","
+        << sql_str(info.role_code) << "," << info.org_id << ","
+        << sql_str(info.org_name) << "," << sql_str(info.email) << ","
+        << sql_str(info.phone) << "," << sql_bool(info.is_active) << ","
+        << sql_str(info.last_login_at) << "," << sql_str(info.created_at) << ","
+        << sql_str(info.updated_at) << ")";
+    return execute(sql.str());
+}
+
+StatusCode Database::update_account_db(const AccountInfo& info) {
+    std::ostringstream sql;
+    sql << "UPDATE accounts SET "
+        << "display_name=" << sql_str(info.display_name) << ","
+        << "role_code=" << sql_str(info.role_code) << ","
+        << "org_id=" << info.org_id << ","
+        << "org_name=" << sql_str(info.org_name) << ","
+        << "email=" << sql_str(info.email) << ","
+        << "phone=" << sql_str(info.phone) << ","
+        << "is_active=" << sql_bool(info.is_active) << ","
+        << "updated_at=" << sql_str(info.updated_at)
+        << " WHERE account_id=" << info.account_id;
+    return execute(sql.str());
+}
+
+StatusCode Database::delete_account_db(int32_t account_id) {
+    std::ostringstream sql;
+    sql << "DELETE FROM accounts WHERE account_id=" << account_id;
+    return execute(sql.str());
+}
+
+std::vector<AccountInfo> Database::list_accounts_db() {
+    std::vector<AccountInfo> result;
+    std::vector<std::vector<std::string>> rows;
+    query("SELECT * FROM accounts ORDER BY account_id ASC", rows);
+    for (const auto& row : rows) result.push_back(account_from_row(row));
     return result;
 }
 

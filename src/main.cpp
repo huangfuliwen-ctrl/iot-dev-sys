@@ -204,10 +204,14 @@ int main(int argc, char* argv[]) {
 
     // ======== Phase 2.3: Organization & Account Management ========
     OrgManager org_mgr;
-    org_mgr.seed_mock_data();
+    org_mgr.set_database(&db);
+    org_mgr.load_from_database();
+    if (org_mgr.org_count() == 0) org_mgr.seed_mock_data();
 
     AccountManager acct_mgr(&org_mgr);
-    acct_mgr.seed_mock_data(); // DEBUG
+    acct_mgr.set_database(&db);
+    acct_mgr.load_from_database();
+    if (acct_mgr.account_count() == 0) acct_mgr.seed_mock_data(); // DEBUG
 
     // ======== Phase 2.5: HTTP API Server + Device Activation (REQ-DM-002) ========
     DeviceActivation activation(db);

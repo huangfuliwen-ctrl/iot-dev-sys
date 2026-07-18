@@ -18,6 +18,9 @@ public:
     AccountManager(OrgManager* org_mgr);
     ~AccountManager();
 
+    void set_database(Database* db) { db_ = db; }
+    StatusCode load_from_database();
+
     // CRUD
     StatusCode create_account(AccountInfo& info, const std::string& password);
     StatusCode update_account(int32_t account_id, const AccountInfo& info);
@@ -50,6 +53,7 @@ private:
     std::string hash_password(const std::string& password) const;  // mock: simple hash
 
     OrgManager* org_mgr_;
+    Database* db_ = nullptr;
     mutable std::recursive_mutex mutex_;
     std::vector<AccountInfo> accounts_;
     std::vector<std::string> invalidated_tokens_;  // logout blacklist

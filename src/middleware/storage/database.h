@@ -101,6 +101,18 @@ public:
     std::optional<FirmwareVersion> get_firmware(const std::string& version);
     std::vector<FirmwareVersion> list_all_firmwares();
 
+    // ======== Organization CRUD ========
+    StatusCode insert_org(const OrgInfo& info);
+    StatusCode update_org_db(const OrgInfo& info);
+    StatusCode delete_org_db(int32_t org_id);
+    std::vector<OrgInfo> list_orgs_db();
+
+    // ======== Account CRUD ========
+    StatusCode insert_account(const AccountInfo& info);
+    StatusCode update_account_db(const AccountInfo& info);
+    StatusCode delete_account_db(int32_t account_id);
+    std::vector<AccountInfo> list_accounts_db();
+
     // ======== Maintenance ========
     StatusCode vacuum();
     StatusCode clean_expired_data(int retention_days);
@@ -119,6 +131,8 @@ private:
     StatusCode create_recipes_table();
     StatusCode create_faults_table();
     StatusCode create_firmwares_table();
+    StatusCode create_organizations_table();
+    StatusCode create_accounts_table();
 
     // Row → struct converters
     Device           device_from_row(const std::vector<std::string>& row) const;
@@ -128,6 +142,8 @@ private:
     Recipe           recipe_from_row(const std::vector<std::string>& row) const;
     FaultInfo        fault_from_row(const std::vector<std::string>& row) const;
     FirmwareVersion  firmware_from_row(const std::vector<std::string>& row) const;
+    OrgInfo          org_from_row(const std::vector<std::string>& row) const;
+    AccountInfo      account_from_row(const std::vector<std::string>& row) const;
 
     struct Impl;
     std::unique_ptr<Impl> impl_;

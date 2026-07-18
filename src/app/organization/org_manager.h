@@ -9,6 +9,8 @@
 
 namespace dev_sys {
 
+class Database;
+
 // ============================================================
 // Org Manager — 多层级组织架构管理 (REQ-ORG-001/003)
 // ============================================================
@@ -16,6 +18,9 @@ class OrgManager {
 public:
     OrgManager();
     ~OrgManager();
+
+    void set_database(Database* db) { db_ = db; }
+    StatusCode load_from_database();
 
     // CRUD
     StatusCode create_org(OrgInfo& info);          // assigns org_id, level, path
@@ -47,6 +52,7 @@ private:
     mutable std::recursive_mutex mutex_;
     std::vector<OrgInfo> orgs_;
     int32_t next_id_ = 1;
+    Database* db_ = nullptr;
 };
 
 } // namespace dev_sys

@@ -1,4 +1,5 @@
 #include "org_manager.h"
+#include "../../middleware/storage/database.h"
 #include <algorithm>
 #include <iostream>
 #include <sstream>
@@ -89,6 +90,21 @@ static void delete_tenant_from_broker(const std::string& tenant_id) {
 OrgManager::OrgManager() = default;
 OrgManager::~OrgManager() = default;
 
+StatusCode OrgManager::load_from_database() {
+    if (!db_) return StatusCode::STORAGE_READ_ERROR;
+    auto db_orgs = db_->list_orgs_db();
+    if (db_orgs.empty()) return StatusCode::OK; // nothing to load
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    int32_t max_id = 0;
+    for (const auto& o : db_orgs) {
+        orgs_.push_back(o);
+        if (o.org_id > max_id) max_id = o.org_id;
+    }
+    next_id_ = max_id + 1;
+    std::cout << "[OrgMgr] Loaded " << orgs_.size() << " organizations from database" << std::endl;
+    return StatusCode::OK;
+}
+
 // ============================================================
 // CRUD
 // ============================================================
@@ -132,6 +148,9 @@ StatusCode OrgManager::create_org(OrgInfo& info) {
 
     orgs_.push_back(info);
 
+    // Persist to database
+    if (db_) db_->insert_org(info);
+
     // Update parent's children_count
     if (info.parent_id != 0) {
         for (auto& o : orgs_) {
@@ -171,6 +190,9 @@ StatusCode OrgManager::update_org(int32_t org_id, const OrgInfo& info) {
     ts << std::put_time(std::gmtime(&t), "%Y-%m-%dT%H:%M:%SZ");
     it->updated_at = ts.str();
 
+    // Sync to database
+    if (db_) db_->update_org_db(*it);
+
     return StatusCode::OK;
 }
 
@@ -186,6 +208,7 @@ StatusCode OrgManager::delete_org(int32_t org_id) {
 
     // Soft delete
     it->is_active = false;
+    if (db_) db_->update_org_db(*it);
     delete_tenant_from_broker(it->tenant_id);
     return StatusCode::OK;
 }
