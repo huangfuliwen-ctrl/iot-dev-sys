@@ -1677,35 +1677,114 @@ int main(int argc, char* argv[]) {
         std::ofstream f("./mqtt_tenant_key.txt", std::ios::trunc);
         if (f.is_open()) f << k;
     };
+    auto load_tenant_name = []() -> std::string {
+        std::ifstream f("./mqtt_tenant_name.txt");
+        if (!f.is_open()) return "";
+        std::string n; std::getline(f, n); return n;
+    };
+    auto save_tenant_name = [](const std::string& n) {
+        std::ofstream f("./mqtt_tenant_name.txt", std::ios::trunc);
+        if (f.is_open()) f << n;
+    };
+
+    // Helper: verify tenant key via MQTT broker API, falls back to local DB
+    auto verify_tenant_via_broker = [mqtt_broker_api, &db](const std::string& key) -> std::pair<bool, std::string> {
+        std::string api_url = *mqtt_broker_api;
+        if (!api_url.empty() && !key.empty()) {
+            std::string host = "127.0.0.1"; int port = 8080;
+            std::string url(api_url); if (url.find("http://") == 0) url = url.substr(7);
+            size_t c = url.find(':'); size_t s = url.find('/');
+            host = (c != std::string::npos) ? url.substr(0, c) : url.substr(0, s);
+            if (c != std::string::npos) port = std::stoi(url.substr(c + 1, s - c - 1));
+
+            int fd = socket(AF_INET, SOCK_STREAM, 0);
+            if (fd >= 0) {
+                timeval tv{2, 0}; setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+                setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+                addrinfo h{}, *res; h.ai_family = AF_INET; h.ai_socktype = SOCK_STREAM;
+                if (getaddrinfo(host.c_str(), std::to_string(port).c_str(), &h, &res) == 0) {
+                    sockaddr_in a{}; memcpy(&a, res->ai_addr, sizeof(a)); freeaddrinfo(res);
+                    if (connect(fd, (sockaddr*)&a, sizeof(a)) >= 0) {
+                        std::ostringstream rs;
+                        rs << "GET /api/v1/tenant/info?key=" << key << " HTTP/1.1\r\n"
+                           << "Host: " << host << ":" << port << "\r\nConnection: close\r\n\r\n";
+                        std::string rss = rs.str(); send(fd, rss.c_str(), rss.size(), 0);
+                        char buf[4096]; auto n = recv(fd, buf, sizeof(buf) - 1, 0);
+                        if (n > 0) {
+                            buf[n] = 0; std::string raw(buf, n);
+                            size_t bs = raw.find("\r\n\r\n");
+                            if (bs != std::string::npos) {
+                                std::string body = raw.substr(bs + 4);
+                                std::string tname = JsonHelper::get_string(body, "name");
+                                if (tname.empty()) tname = JsonHelper::get_string(body, "tenant_id");
+                                if (!tname.empty()) { close(fd); return {true, tname}; }
+                            }
+                        }
+                    }
+                }
+                close(fd);
+            }
+        }
+
+        // Fallback: query local database tenants table
+        if (!key.empty()) {
+            std::ostringstream sql;
+            sql << "SELECT name FROM tenants WHERE tenant_id='"
+                << key << "' AND active=TRUE";
+            std::vector<std::vector<std::string>> rows;
+            if (db.query(sql.str(), rows) == StatusCode::OK && !rows.empty() && !rows[0].empty()) {
+                return {true, rows[0][0]};
+            }
+        }
+
+        return {false, ""};
+    };
 
     api.get("/api/v1/mqtt-tenant-key",
-        [&load_tenant_key](const HttpRequest&) -> HttpResponse {
+        [&load_tenant_key, &load_tenant_name](const HttpRequest&) -> HttpResponse {
             std::string k = load_tenant_key();
+            std::string n = load_tenant_name();
             std::ostringstream j;
-            j << R"({"code":0,"message":"success","data":{"tenant_key":)"
-              << (k.empty() ? "null" : "\"" + k + "\"") << "}}";
+            j << R"({"code":0,"message":"success","data":{)";
+            j << R"("tenant_key":)" << (k.empty() ? "null" : "\"" + k + "\"") << ",";
+            j << R"("tenant_name":)" << (n.empty() ? "null" : "\"" + n + "\"");
+            j << "}}";
             return ApiServer::json_response(200, j.str());
         });
 
     api.put("/api/v1/mqtt-tenant-key",
-        [&save_tenant_key](const HttpRequest& req) -> HttpResponse {
+        [&save_tenant_key, &save_tenant_name, &verify_tenant_via_broker](const HttpRequest& req) -> HttpResponse {
             std::string k = JsonHelper::get_string(req.body, "tenant_key");
             if (k.empty()) return ApiServer::error_response(400, 1001, "tenant_key required");
+
+            // Verify key via MQTT broker before saving
+            auto [valid, tname] = verify_tenant_via_broker(k);
+            if (!valid) {
+                return ApiServer::json_response(200,
+                    R"({"code":1001,"message":"无效的租户Key，未找到对应租户","data":null})");
+            }
+
             save_tenant_key(k);
-            return ApiServer::json_response(200,
-                R"({"code":0,"message":"success","data":{"updated":true}})");
+            save_tenant_name(tname);
+            std::ostringstream j;
+            j << R"({"code":0,"message":"success","data":{)";
+            j << R"("tenant_key":")" << k << R"(",)";
+            j << R"("tenant_name":")" << tname << R"(")";
+            j << "}}";
+            return ApiServer::json_response(200, j.str());
         });
 
     api.del("/api/v1/mqtt-tenant-key",
-        [&save_tenant_key](const HttpRequest&) -> HttpResponse {
+        [&save_tenant_key, &save_tenant_name](const HttpRequest&) -> HttpResponse {
             save_tenant_key("");
+            save_tenant_name("");
             return ApiServer::json_response(200,
                 R"({"code":0,"message":"success","data":{"deleted":true}})");
         });
 
     // Verify mqtt tenant key (frontend uses this path)
     api.get("/api/v1/mqtt-tenant-key/verify",
-        [mqtt_broker_api](const HttpRequest& req) -> HttpResponse {
+        [&verify_tenant_via_broker](const HttpRequest& req) -> HttpResponse {
             auto qp = [&req](const std::string& k) -> std::string {
                 std::string s = k + "=";
                 size_t p = req.query.find(s); if (p == std::string::npos) return "";
@@ -1718,52 +1797,10 @@ int main(int argc, char* argv[]) {
                 return ApiServer::json_response(200,
                     R"({"code":0,"message":"success","data":{"valid":false,"tenant_name":null}})");
 
-            std::string api_url = *mqtt_broker_api;
-            if (api_url.empty()) {
-                return ApiServer::json_response(200,
-                    R"({"code":0,"message":"success","data":{"valid":false,"tenant_name":null}})");
-            }
-
-            std::string host = "127.0.0.1"; int port = 8080;
-            std::string url(api_url); if (url.find("http://") == 0) url = url.substr(7);
-            size_t c = url.find(':'); size_t s = url.find('/');
-            host = (c != std::string::npos) ? url.substr(0, c) : url.substr(0, s);
-            if (c != std::string::npos) port = std::stoi(url.substr(c + 1, s - c - 1));
-
-            int fd = socket(AF_INET, SOCK_STREAM, 0); if (fd < 0)
-                return ApiServer::json_response(200,
-                    R"({"code":0,"message":"success","data":{"valid":false,"tenant_name":null}})");
-            timeval tv{3, 0}; setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
-            setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
-            addrinfo h{}, *res; h.ai_family = AF_INET; h.ai_socktype = SOCK_STREAM;
-            if (getaddrinfo(host.c_str(), std::to_string(port).c_str(), &h, &res) != 0) {
-                close(fd); return ApiServer::json_response(200,
-                    R"({"code":0,"message":"success","data":{"valid":false,"tenant_name":null}})");
-            }
-            sockaddr_in a{}; memcpy(&a, res->ai_addr, sizeof(a)); freeaddrinfo(res);
-            if (connect(fd, (sockaddr*)&a, sizeof(a)) < 0) { close(fd);
-                return ApiServer::json_response(200,
-                    R"({"code":0,"message":"success","data":{"valid":false,"tenant_name":null}})");
-            }
-            std::ostringstream rs; rs << "GET /api/v1/tenant/info?key=" << key << " HTTP/1.1\r\n"
-               << "Host: " << host << ":" << port << "\r\nConnection: close\r\n\r\n";
-            std::string rss = rs.str(); send(fd, rss.c_str(), rss.size(), 0);
-            char buf[4096]; auto n = recv(fd, buf, sizeof(buf) - 1, 0); close(fd);
-            if (n <= 0) return ApiServer::json_response(200,
-                    R"({"code":0,"message":"success","data":{"valid":false,"tenant_name":null}})");
-            buf[n] = 0; std::string raw(buf, n);
-            size_t bs = raw.find("\r\n\r\n");
-            if (bs == std::string::npos) return ApiServer::json_response(200,
-                    R"({"code":0,"message":"success","data":{"valid":false,"tenant_name":null}})");
-            std::string body = raw.substr(bs + 4);
-
-            // Extract tenant_id from mqtt_broker response
-            // Response: {"code":0,"data":{"tenant_id":"xxx","tenant_key":"...",...}}
-            std::string tid = JsonHelper::get_string(body, "tenant_id");
-            bool valid = !tid.empty();
+            auto [valid, tname] = verify_tenant_via_broker(key);
             std::ostringstream j;
             j << R"({"code":0,"message":"success","data":{"valid":)" << (valid ? "true" : "false")
-              << R"(,"tenant_name":")" << tid << R"("}})";
+              << R"(,"tenant_name":)" << (tname.empty() ? "null" : "\"" + tname + "\"") << "}}";
             return ApiServer::json_response(200, j.str());
         });
 
