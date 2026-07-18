@@ -197,17 +197,17 @@ int main(int argc, char* argv[]) {
         }
     }
     // Seed mock data ONLY if still empty after disk scan
-    ota_mgr.seed_mock_data();
+//     ota_mgr.seed_mock_data();
     fault_mgr.set_database(&db);
     fault_mgr.load_from_database();
-    fault_mgr.seed_mock_data();
+//     fault_mgr.seed_mock_data();
 
     // ======== Phase 2.3: Organization & Account Management ========
     OrgManager org_mgr;
-    org_mgr.seed_mock_data();
+//     org_mgr.seed_mock_data();
 
     AccountManager acct_mgr(&org_mgr);
-    acct_mgr.seed_mock_data(); // DEBUG
+//     acct_mgr.seed_mock_data(); // DEBUG
 
     // ======== Phase 2.5: HTTP API Server + Device Activation (REQ-DM-002) ========
     DeviceActivation activation(db);
@@ -404,6 +404,26 @@ int main(int argc, char* argv[]) {
             json << R"("device_id":")" << device_id << R"(",)";
             json << R"("tenant_id":")" << new_tenant << R"("}})";
             return ApiServer::json_response(200, json.str());
+        });
+
+    // Delete device
+    api.del("/api/v1/devices/{device_id}",
+        [&device_mgr, &db](const HttpRequest& req) -> HttpResponse {
+            std::string did = req.path.substr(std::string("/api/v1/devices/").size());
+            // Find tenant for this device
+            std::string tid;
+            for (const auto& d : device_mgr.list_all_devices()) {
+                if (d.device_id == did) { tid = d.tenant_id; break; }
+            }
+            if (tid.empty()) return ApiServer::error_response(404, 1002, "Device not found: " + did);
+            // Remove from in-memory
+            device_mgr.remove_device(tid, did);
+            // Remove from DB
+            db.execute("DELETE FROM activation_tokens WHERE device_id='" + did + "'");
+            db.execute("DELETE FROM devices WHERE device_id='" + did + "'");
+            std::ostringstream j;
+            j << R"({"code":0,"message":"success","data":{"device_id":")" << did << R"(","deleted":true}})";
+            return ApiServer::json_response(200, j.str());
         });
 
     // ======== Device Types API (CRUD for frontend) ========

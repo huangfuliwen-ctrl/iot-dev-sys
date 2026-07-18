@@ -40,6 +40,7 @@ public:
 
     // ======== Device registration ========
     StatusCode register_device(const Device& device);
+    StatusCode remove_device(const std::string& tenant_id, const std::string& device_id);
     StatusCode update_device_status(const std::string& tenant_id,
                                      const std::string& device_id,
                                      DeviceStatus status);

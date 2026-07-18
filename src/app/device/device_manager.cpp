@@ -75,6 +75,18 @@ StatusCode DeviceManager::register_device(const Device& device) {
     return StatusCode::OK;
 }
 
+StatusCode DeviceManager::remove_device(const std::string& tenant_id,
+                                         const std::string& device_id) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto it = tenants_.find(tenant_id);
+    if (it == tenants_.end()) return StatusCode::DEV_NOT_ACTIVATED;
+    auto erased = it->second.map.erase(device_id);
+    if (erased == 0) return StatusCode::DEV_NOT_ACTIVATED;
+    if (it->second.map.empty()) tenants_.erase(it);
+    std::cout << "[DeviceMgr] Removed device: " << device_id << std::endl;
+    return StatusCode::OK;
+}
+
 StatusCode DeviceManager::update_device_status(const std::string& tenant_id,
                                                 const std::string& device_id,
                                                 DeviceStatus status) {
