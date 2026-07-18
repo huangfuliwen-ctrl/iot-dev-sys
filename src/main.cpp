@@ -197,17 +197,17 @@ int main(int argc, char* argv[]) {
         }
     }
     // Seed mock data ONLY if still empty after disk scan
-//     ota_mgr.seed_mock_data();
+    ota_mgr.seed_mock_data();
     fault_mgr.set_database(&db);
     fault_mgr.load_from_database();
-//     fault_mgr.seed_mock_data();
+    fault_mgr.seed_mock_data();
 
     // ======== Phase 2.3: Organization & Account Management ========
     OrgManager org_mgr;
-//     org_mgr.seed_mock_data();
+    org_mgr.seed_mock_data();
 
     AccountManager acct_mgr(&org_mgr);
-//     acct_mgr.seed_mock_data(); // DEBUG
+    acct_mgr.seed_mock_data(); // DEBUG
 
     // ======== Phase 2.5: HTTP API Server + Device Activation (REQ-DM-002) ========
     DeviceActivation activation(db);
