@@ -108,7 +108,7 @@ public:
     }
     std::string error(){return err_;}
     bool sub(const std::string& t,int q=1){ if(!ok_)return false; uint16_t i=htons(pid_++); std::string v; v.append((char*)&i,2); v+=es(t); v+=(char)q; std::string pk; pk+=(char)0x82; pk+=el(v.size()); pk+=v; send(fd_,pk.c_str(),pk.size(),0); return true; }
-    bool pub(const std::string& t,const std::string& pl,int q=1){ if(!ok_)return false; std::string v; v+=es(t); if(q>0){uint16_t i=htons(pid_++);v.append((char*)&i,2);} v+=pl; uint8_t h=(uint8_t)(0x30|(q<<1)); std::string pk; pk+=(char)h; pk+=el(v.size()); pk+=v; send(fd_,pk.c_str(),pk.size(),0); return true; }
+    bool pub(const std::string& t,const std::string& pl,int q=1){ if(!ok_)return false; std::cerr<<"[MQTT] → "<<t<<" | "<<(pl.size()>150?pl.substr(0,150)+"...":pl)<<std::endl; std::string v; v+=es(t); if(q>0){uint16_t i=htons(pid_++);v.append((char*)&i,2);} v+=pl; uint8_t h=(uint8_t)(0x30|(q<<1)); std::string pk; pk+=(char)h; pk+=el(v.size()); pk+=v; send(fd_,pk.c_str(),pk.size(),0); return true; }
     void disc(){ ok_=false; if(fd_>=0){char d[]={(char)0xE0,0x00};send(fd_,d,2,0);close(fd_);fd_=-1;} }
     bool ok(){return ok_;}
 };
@@ -117,16 +117,24 @@ public:
 // 设备模拟器
 // ============================================================
 struct Sim {
-    struct Cfg { std::string url="http://127.0.0.1:9080", mqtt_uri="tcp://127.0.0.1:1883", hwuid, mk="01KX5M2KM8EBW9G1CWVMJ94TSK"; int hb=30,dur=0; bool no_mqtt=false; };
+    struct Cfg { std::string url="http://127.0.0.1:9080", mqtt_uri="tcp://127.0.0.1:1883", hwuid, mk="01KXW0CFN798QFGS86XBDG574A"; int hb=30,dur=0; bool no_mqtt=false; };
     Cfg c_; Http http_; Mqtt mqtt_;
     std::atomic<bool> run_{true};
-    std::string did_,tid_,pid_,tok_,bri_,mc_,fw_,tname_;
-    int stat_=0;
+    std::string did_,tid_,pid_,tok_,bri_,mc_,fw_;
+    int net_stat_=0, work_stat_=0;  // 0=ONLINE, 0=IDLE
 
-    Sim(const Cfg& c):c_(c),http_(c.url){ if(c_.hwuid.empty())c_.hwuid="SIM-"+U::rhex(8); }
+    Sim(const Cfg& c):c_(c),http_(c.url){ if(c_.hwuid.empty())c_.hwuid="SIM-"+U::rhex(8); fetch_model_key(); }
     ~Sim(){ mqtt_.disc(); }
 
     void L(const std::string& m){ std::cerr<<"[Sim] "<<m<<std::endl; }
+
+    // 从云端获取有效的 model_key
+    void fetch_model_key(){
+        auto r=http_.get("/api/v1/device-models");
+        if(r.s!=200) return;
+        std::string mk=U::jg(r.b,"model_key");
+        if(!mk.empty()){ c_.mk=mk; L("获取到有效 model_key: "+mk); }
+    }
 
     // 阶段1: 激活
     bool activate(){
@@ -140,53 +148,42 @@ struct Sim {
         tok_=U::jg(r.b,"activation_token"); bri_=U::jg(r.b,"mqtt_broker_uri");
         mc_=U::jg(r.b,"model_code"); fw_=U::jg(r.b,"firmware_version");
         L("✓ 激活成功 device="+did_+" model="+mc_+" fw="+fw_);
-        resolve_mqtt_tenant();
         save_creds(); return true;
-    }
-    void resolve_mqtt_tenant(){
-        auto kr=http_.get("/api/v1/mqtt-tenant-key");
-        std::string key=U::jg(kr.b,"tenant_key");
-        if(!key.empty()&&key!="null"){
-            auto vr=http_.get("/api/v1/mqtt-tenant-key/verify?key="+key);
-            std::string nm=U::jg(vr.b,"tenant_name");
-            if(!nm.empty()){ tname_=nm; L("  MQTT租户: "+tname_+" (接口)"); return; }
-        }
-        if(!tname_.empty()) L("  MQTT租户: "+tname_+" (缓存)");
     }
     bool try_load(){
         std::ifstream f("./device_creds.json"); if(!f.is_open())return false;
         std::string j((std::istreambuf_iterator<char>(f)),std::istreambuf_iterator<char>());
         did_=U::jg(j,"device_id"); tid_=U::jg(j,"tenant_id"); pid_=U::jg(j,"product_id");
         tok_=U::jg(j,"token"); bri_=U::jg(j,"broker_uri"); mc_=U::jg(j,"model_code");
-        fw_=U::jg(j,"firmware_version"); tname_=U::jg(j,"mqtt_tenant");
+        fw_=U::jg(j,"firmware_version");
         if(did_.empty())return false;
-        L("✓ 已激活(本地凭证) device="+did_+" model="+mc_+" MQTT租户="+tid_);
+        L("✓ 已激活(本地凭证) device="+did_+" model="+mc_);
         return true;
     }
     void save_creds(){ std::ofstream f("./device_creds.json");
         f<<"{\"device_id\":\""<<did_<<"\",\"tenant_id\":\""<<tid_
          <<"\",\"product_id\":\""<<pid_<<"\",\"token\":\""<<tok_
          <<"\",\"broker_uri\":\""<<bri_<<"\",\"model_code\":\""<<mc_
-         <<"\",\"firmware_version\":\""<<fw_
-         <<"\",\"mqtt_tenant\":\""<<tname_<<"\"}"; }
+         <<"\",\"firmware_version\":\""<<fw_<<"\"}"; }
 
     // 阶段2: MQTT
     bool connect_mqtt(){
         if(c_.no_mqtt){ L("⚠ MQTT skipped"); return true; }
-        std::string mqtt_user = (tname_.empty() ? tid_ : tname_) + "/" + did_;
-        std::string base=tid_+"/iot/"+pid_+"/"+did_;
+        std::string mqtt_user = tid_ + "/" + did_;
+        std::string base=did_+"/v1";
         L("══════ 阶段2: MQTT连接 ══════");
         L("  broker:   "+bri_);
         L("  clientId: "+did_);
         L("  username: "+mqtt_user);
         // Set Will Message: broker publishes "offline" if device disconnects abnormally
-        mqtt_.set_will(base+"/status", "{\"status\":\"offline\"}");
+        mqtt_.set_will(base+"/status", "{\"network_status\":1,\"work_status\":0}");
         if(!mqtt_.conn(bri_,did_,mqtt_user,"")){ L("✗ MQTT失败: "+mqtt_.error()); return false; }
         mqtt_.sub(base+"/property/set"); mqtt_.sub(base+"/ota/notify"); mqtt_.sub(base+"/command/+");
-        // Publish retained "online" — cloud sees device is alive via MQTT state
-        mqtt_.pub(base+"/status","{\"status\":\"online\"}",1);
+        // Publish retained "online" with dual-status
+        net_stat_=0;
+        mqtt_.pub(base+"/status","{\"network_status\":0,\"work_status\":0}",1);
         L("✓ MQTT已连接, 已订阅下行Topic");
-        mqtt_.pub(base+"/heartbeat","{\"status\":0,\"ts\":\""+U::now()+"\"}");
+        mqtt_.pub(did_+"/v1/heartbeat","{\"network_status\":0,\"work_status\":0,\"ts\":\""+U::now()+"\"}");
         return true;
     }
 
@@ -206,20 +203,20 @@ struct Sim {
     void stop(){ run_=false; }
 
     void heartbeat(){
-        std::ostringstream b; b<<"{\"device_id\":\""<<did_<<"\",\"timestamp\":\""<<U::now()<<"\",\"status\":"<<stat_<<",\"firmware_version\":\""<<fw_<<"\",\"signal_strength\":"<<(80+rand()%20)<<",\"alarm_count\":0}";
-        if(mqtt_.ok()){ mqtt_.pub(tid_+"/iot/"+pid_+"/"+did_+"/heartbeat",b.str()); L("[MQTT] heartbeat"); }
-        else{ auto r=http_.post("/api/v1/device/heartbeat",b.str()); L("[HTTP] heartbeat → "+std::to_string(r.s)); }
+        std::ostringstream b; b<<"{\"device_id\":\""<<did_<<"\",\"timestamp\":\""<<U::now()<<"\",\"network_status\":"<<net_stat_<<",\"work_status\":"<<work_stat_<<",\"firmware_version\":\""<<fw_<<"\",\"signal_strength\":"<<(80+rand()%20)<<",\"alarm_count\":0}";
+        if(mqtt_.ok()){ mqtt_.pub(did_+"/v1/heartbeat",b.str()); }
+        else{ L("[WARN] MQTT 未连接，心跳跳过"); }
     }
     void properties(){
         std::ostringstream b; b<<"{\"device_id\":\""<<did_<<"\",\"properties\":{\"cpu_temp_c\":"<<(45+rand()%20)<<",\"water_temp_c\":"<<(85+rand()%10)<<"}}";
-        if(mqtt_.ok()){ mqtt_.pub(tid_+"/iot/"+pid_+"/"+did_+"/property/post",b.str()); L("[MQTT] properties"); }
+        if(mqtt_.ok()){ mqtt_.pub(did_+"/v1/property/post",b.str()); }
     }
     void events(int cy){
-        auto ev=[this](const std::string& t,const std::string& d){ std::string b="{\"event_type\":\""+t+"\","+d.substr(1); if(mqtt_.ok())mqtt_.pub(tid_+"/iot/"+pid_+"/"+did_+"/event/post",b); };
-        if(cy==3){ stat_=1; ev("order_status","{\"order_id\":\"S"+U::rhex(3)+"\",\"status\":2}"); L("[Event] 制作中"); }
-        if(cy==4){ stat_=0; ev("order_status","{\"status\":3}"); L("[Event] 完成"); }
-        if(cy==8){ stat_=2; ev("fault_alert","{\"fault_code\":3,\"fault_level\":3,\"description\":\"水泵异常(模拟)\"}"); L("[Event] 故障L3"); }
-        if(cy==12){ stat_=0; ev("fault_resolved","{\"fault_code\":3}"); L("[Event] 恢复"); }
+        auto ev=[this](const std::string& t,const std::string& d){ std::string b="{\"event_type\":\""+t+"\","+d.substr(1); if(mqtt_.ok())mqtt_.pub(did_+"/v1/event/post",b); };
+        if(cy==3){ work_stat_=1; ev("order_status","{\"order_id\":\"S"+U::rhex(3)+"\",\"status\":2}"); L("[Event] 制作中 BREWING"); }
+        if(cy==4){ work_stat_=0; ev("order_status","{\"status\":3}"); L("[Event] 完成 → IDLE"); }
+        if(cy==8){ work_stat_=2; ev("fault_alert","{\"fault_code\":3,\"fault_level\":3,\"description\":\"水泵异常(模拟)\"}"); L("[Event] 故障 FAULT L3"); }
+        if(cy==12){ work_stat_=0; ev("fault_resolved","{\"fault_code\":3}"); L("[Event] 恢复 → IDLE"); }
     }
     void config(){ auto r=http_.get("/api/v1/config"); L("[Config] HTTP "+std::to_string(r.s)); }
     void recipes(){ auto r=http_.get("/api/v1/recipes"); int n=0; for(size_t p=0;(p=r.b.find("\"recipe_id\":\"",p))!=std::string::npos;p++)n++; L("[Recipes] HTTP "+std::to_string(r.s)+" count="+std::to_string(n)); }

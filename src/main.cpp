@@ -74,17 +74,17 @@ static std::optional<TokenPayload> extract_auth(const HttpRequest& req, AccountM
 //   1. 初始化数据库/日志/TLS
 //   2. 加载设备注册信息
 //   3. 创建消息路由器和各业务模块
-//   4. 连接MQTT Broker，订阅通配符topic: +/iot/+/+/...
+//   4. 连接MQTT Broker，订阅通配符topic: +/v1/...
 //   5. 进入消息驱动主循环
 //
 // MQTT角色: 特权客户端(可订阅所有租户所有设备topic)
 // 消息流:
-//   IN:  +/iot/+/+/heartbeat      → DeviceManager
-//   IN:  +/iot/+/+/event/post      → OrderManager / FaultManager
-//   IN:  +/iot/+/+/property/post   → DeviceManager
-//   IN:  +/iot/+/+/ota/progress    → OtaManager
-//   OUT: {tenant}/iot/{product}/{device}/command/{cmd}
-//   OUT: {tenant}/iot/{product}/{device}/ota/notify
+//   IN:  +/v1/heartbeat       → DeviceManager
+//   IN:  +/v1/event/post       → OrderManager / FaultManager
+//   IN:  +/v1/property/post    → DeviceManager
+//   IN:  +/v1/ota/progress     → OtaManager
+//   OUT: {device}/v1/command/{cmd}
+//   OUT: {device}/v1/ota/notify
 // ============================================================
 int main(int argc, char* argv[]) {
     std::signal(SIGINT, signal_handler);
@@ -97,6 +97,7 @@ int main(int argc, char* argv[]) {
 
     // Load MQTT config (broker host/port/api from mqtt_config.json)
     std::string broker_host = "127.0.0.1";
+    std::string mqtt_user = "devsys", mqtt_pass = "";
     int broker_port = 1883, broker_api_port = 8080;
     {
         std::ifstream cf("./config/mqtt_config.json");
@@ -117,8 +118,11 @@ int main(int argc, char* argv[]) {
             broker_host = jg("broker_host"); if (broker_host.empty()) broker_host = "127.0.0.1";
             broker_port = ji("broker_port", 1883);
             broker_api_port = ji("broker_api_port", 8080);
+            mqtt_user = jg("username");
+            mqtt_pass = jg("password");
             std::cout << "[Main] MQTT broker: " << broker_host << ":" << broker_port
-                      << "  API: " << broker_host << ":" << broker_api_port << std::endl;
+                      << "  API: " << broker_host << ":" << broker_api_port
+                      << "  user: " << mqtt_user << std::endl;
         }
     }
     auto mqtt_broker_uri = std::make_shared<std::string>(
@@ -164,8 +168,7 @@ int main(int argc, char* argv[]) {
     recipe_mgr.load_from_database();
     ota_mgr.set_database(&db);
     ota_mgr.load_from_database();
-    // Scan disk FIRST — so seed_mock_data skips if files already exist
-    // Scan disk for firmware files not yet in memory (survives restart)
+    // Scan disk for firmware files (survives restart)
     {
         namespace fs = std::filesystem;
         std::error_code ec;
@@ -196,27 +199,25 @@ int main(int argc, char* argv[]) {
             std::cout << "[OtaMgr] Disk scan complete" << std::endl;
         }
     }
-    // Seed mock data ONLY if still empty after disk scan
-    ota_mgr.seed_mock_data();
     fault_mgr.set_database(&db);
     fault_mgr.load_from_database();
-    fault_mgr.seed_mock_data();
 
     // ======== Phase 2.3: Organization & Account Management ========
     OrgManager org_mgr;
     org_mgr.set_database(&db);
     org_mgr.load_from_database();
-    if (org_mgr.org_count() == 0) org_mgr.seed_mock_data();
 
     AccountManager acct_mgr(&org_mgr);
     acct_mgr.set_database(&db);
     acct_mgr.load_from_database();
-    if (acct_mgr.account_count() == 0) acct_mgr.seed_mock_data(); // DEBUG
 
     // ======== Phase 2.5: HTTP API Server + Device Activation (REQ-DM-002) ========
     DeviceActivation activation(db);
     activation.set_tls_manager(&tls_mgr);
     activation.set_broker_uri(*mqtt_broker_uri);
+    // 从数据库读取默认租户名
+    { std::string tn = db.load_tenant_config("tenant_name");
+      if (!tn.empty()) activation.set_default_tenant(tn); }
 
     DeviceTypeManager type_mgr(db);
 
@@ -244,6 +245,7 @@ int main(int argc, char* argv[]) {
             ActivationRequest act_req;
             act_req.uid      = JsonHelper::get_string(req.body, "uid");
             act_req.model_key = JsonHelper::get_string(req.body, "model_key");
+            // tenant_id is NOT accepted from device — server assigns it
             std::string remote_ip = req.remote_ip.empty() ? "127.0.0.1" : req.remote_ip;
 
             ActivationResponse resp = activation.process_activation(act_req, remote_ip);
@@ -263,9 +265,11 @@ int main(int argc, char* argv[]) {
                 dev.model        = resp.model_code;
                 dev.hardware_uid = act_req.uid;
                 dev.firmware_version = resp.firmware_version;
-                dev.status       = DeviceStatus::OFFLINE;
+                dev.network_status = NetworkStatus::ONLINE;
+                dev.work_status    = WorkStatus::IDLE;
                 dev.activated    = true;
-                dev.last_heartbeat_at = 0;
+                dev.last_heartbeat_at = std::chrono::duration_cast<std::chrono::seconds>(
+                    std::chrono::system_clock::now().time_since_epoch()).count();
                 dev.activated_at = std::chrono::duration_cast<std::chrono::seconds>(
                     std::chrono::system_clock::now().time_since_epoch()).count();
                 device_mgr.register_device(dev);
@@ -291,21 +295,8 @@ int main(int argc, char* argv[]) {
             return ApiServer::json_response(resp.success ? 201 : 400, json.str());
         });
 
-    // HTTP heartbeat (MQTT fallback for devices without MQTT)
-    api.post("/api/v1/device/heartbeat",
-        [&device_mgr](const HttpRequest& req) -> HttpResponse {
-            std::string did  = JsonHelper::get_string(req.body, "device_id");
-            std::string tid  = "default";
-            std::string pid  = "coffee_v1";
-            // Find device to get its tenant/product
-            for (const auto& d : device_mgr.list_all_devices()) {
-                if (d.device_id == did) { tid = d.tenant_id; pid = d.product_id; break; }
-            }
-            if (did.empty())
-                return ApiServer::error_response(400, 1001, "device_id required");
-            device_mgr.process_heartbeat(tid, did, pid, req.body);
-            return ApiServer::json_response(200, R"({"code":0,"message":"success"})");
-        });
+    // Device heartbeat: MQTT only (see message_router.cpp handle_heartbeat)
+    // No HTTP fallback — devices must use MQTT for heartbeat
 
     // Device status query (supports org_scope filtering via Bearer token)
     api.get("/api/v1/device/status",
@@ -338,7 +329,8 @@ int main(int argc, char* argv[]) {
                 first = false;
                 json << "{\"device_id\":\"" << dev.device_id << "\","
                      << "\"tenant_id\":\"" << dev.tenant_id << "\","
-                     << "\"status\":" << static_cast<int>(dev.status) << ","
+                     << "\"network_status\":" << static_cast<int>(dev.network_status) << ","
+                     << "\"work_status\":" << static_cast<int>(dev.work_status) << ","
                      << "\"type\":" << static_cast<int>(dev.type)
                      << "}";
             }
@@ -375,7 +367,8 @@ int main(int argc, char* argv[]) {
                 json << R"("hardware_uid":")" << d.hardware_uid << R"(",)";
                 json << R"("firmware_version":")" << d.firmware_version << R"(",)";
                 json << R"("type":)" << static_cast<int>(d.type) << ",";
-                json << R"("status":)" << static_cast<int>(d.status) << ",";
+                json << R"("network_status":)" << static_cast<int>(d.network_status) << ",";
+                json << R"("work_status":)" << static_cast<int>(d.work_status) << ",";
                 json << R"("activated":)" << (d.activated ? "true" : "false") << ",";
                 json << R"("last_heartbeat_at":)" << d.last_heartbeat_at << ",";
                 json << R"("activated_at":)" << d.activated_at;
@@ -1664,7 +1657,8 @@ int main(int argc, char* argv[]) {
                      << R"("device_id":")" << d.device_id << R"(",)";
                 json << R"("product_id":")" << d.product_id << R"(",)";
                 json << R"("type":)" << static_cast<int>(d.type) << ",";
-                json << R"("status":)" << static_cast<int>(d.status) << ",";
+                json << R"("network_status":)" << static_cast<int>(d.network_status) << ",";
+                json << R"("work_status":)" << static_cast<int>(d.work_status) << ",";
                 json << R"("firmware_version":")" << d.firmware_version << R"(",)";
                 json << R"("model":")" << d.model << R"(",)";
                 json << R"("last_heartbeat_at":)" << d.last_heartbeat_at;
@@ -1707,25 +1701,11 @@ int main(int argc, char* argv[]) {
             return ApiServer::json_response(200, json.str());
         });
 
-    // ---- MQTT Tenant Key management (stored in ./mqtt_tenant_key.txt) ----
-    auto load_tenant_key = []() -> std::string {
-        std::ifstream f("./mqtt_tenant_key.txt");
-        if (!f.is_open()) return "";
-        std::string k; std::getline(f, k); return k;
-    };
-    auto save_tenant_key = [](const std::string& k) {
-        std::ofstream f("./mqtt_tenant_key.txt", std::ios::trunc);
-        if (f.is_open()) f << k;
-    };
-    auto load_tenant_name = []() -> std::string {
-        std::ifstream f("./mqtt_tenant_name.txt");
-        if (!f.is_open()) return "";
-        std::string n; std::getline(f, n); return n;
-    };
-    auto save_tenant_name = [](const std::string& n) {
-        std::ofstream f("./mqtt_tenant_name.txt", std::ios::trunc);
-        if (f.is_open()) f << n;
-    };
+    // ---- MQTT Tenant Key management (stored in database) ----
+    auto load_tenant_key = [&db]() -> std::string { return db.load_tenant_config("tenant_key"); };
+    auto save_tenant_key = [&db](const std::string& k) { db.save_tenant_config(k, db.load_tenant_config("tenant_name")); };
+    auto load_tenant_name = [&db]() -> std::string { return db.load_tenant_config("tenant_name"); };
+    auto save_tenant_name = [&db](const std::string& n) { db.save_tenant_config(db.load_tenant_config("tenant_key"), n); };
 
     // Helper: verify tenant key via MQTT broker API, falls back to local DB
     auto verify_tenant_via_broker = [mqtt_broker_api, &db](const std::string& key) -> std::pair<bool, std::string> {
@@ -2322,11 +2302,8 @@ int main(int argc, char* argv[]) {
             router.on_message(topic, payload);
         });
 
-    // 设置Will消息（服务离线通知）
-    mqtt.set_will_message(
-        "cloud-platform/status",
-        R"({"service":"dev-sys-cloud","status":"offline"})",
-        1);
+    // Will message disabled (broker may require auth for retained/Will)
+    // mqtt.set_will_message("cloud-platform/status", R"({"status":"offline"})", 1);
 
     ServiceConfig svc_config;
     svc_config.mqtt_broker_uri = *mqtt_broker_uri;
@@ -2334,17 +2311,14 @@ int main(int argc, char* argv[]) {
 
     if (mqtt.connect(svc_config.mqtt_broker_uri,
                       svc_config.mqtt_client_id,
-                      "/etc/dev-sys-cloud/certs/ca.pem",
-                      "/etc/dev-sys-cloud/certs/client.pem",
-                      "/etc/dev-sys-cloud/certs/client_key.pem",
-                      "cloud/platform") != StatusCode::OK) {
+                      "", "", "",   // cert paths — use TCP without TLS
+                      mqtt_user, mqtt_pass) != StatusCode::OK) {
         std::cerr << "[Main] MQTT connection failed — HTTP API still available" << std::endl;
         *mqtt_connected = false;
     } else {
         *mqtt_connected = true;
     }
 
-    *mqtt_connected = mqtt.is_connected();
     if (mqtt.is_connected()) {
         log_mgr.info("main", "MQTT connected to " + svc_config.mqtt_broker_uri);
     } else {

@@ -115,8 +115,8 @@ StatusCode OtaManager::push_grayscale(const std::string& product_id,
         auto all_devices = device_mgr_->list_all_devices();
         for (const auto& dev : all_devices) {
             if (dev.product_id == product_id && dev.activated &&
-                dev.status != DeviceStatus::OFFLINE &&
-                dev.status != DeviceStatus::FAULT &&
+                dev.network_status != NetworkStatus::OFFLINE &&
+                dev.work_status    != WorkStatus::FAULT &&
                 dev.firmware_version != target_version) {
                 candidates.push_back(dev);
             }

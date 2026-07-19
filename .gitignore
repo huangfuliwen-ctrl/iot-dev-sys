@@ -7,3 +7,4 @@ firmware/
 device_creds.json
 mqtt_tenant_key.txt
 mqtt_tenant_name.txt
+CMakeFiles/

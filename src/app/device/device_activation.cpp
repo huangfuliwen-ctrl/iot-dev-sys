@@ -59,11 +59,12 @@ ActivationResponse DeviceActivation::process_activation(const ActivationRequest&
         return resp;
     }
 
-    // Step 4: Ensure tenant (using default for now)
-    std::string tenant = "default";
+    // Step 4: Tenant assigned by server (from DB config), NOT from device request
+    std::string tenant = default_tenant_.empty() ? "default" : default_tenant_;
     {
         std::ostringstream sql;
-        sql << "INSERT INTO tenants (tenant_id, name) VALUES ('default','Default') ON CONFLICT DO NOTHING";
+        sql << "INSERT INTO tenants (tenant_id, name) VALUES ('"
+            << tenant << "','" << tenant << "') ON CONFLICT DO NOTHING";
         db_.execute(sql.str());
     }
 
@@ -81,7 +82,8 @@ ActivationResponse DeviceActivation::process_activation(const ActivationRequest&
     dev.model            = model->model_code;
     dev.hardware_uid     = request.uid;
     dev.firmware_version = model->firmware_base;
-    dev.status           = DeviceStatus::OFFLINE;
+    dev.network_status   = NetworkStatus::OFFLINE;
+    dev.work_status      = WorkStatus::IDLE;
     dev.activated        = true;
     dev.last_heartbeat_at = 0;
 

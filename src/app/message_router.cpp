@@ -23,12 +23,13 @@ void MessageRouter::set_recipe_manager(RecipeManager* mgr) { recipe_mgr_ = mgr; 
 // ============================================================
 std::vector<std::string> MessageRouter::subscription_topics() {
     return {
-        "+/iot/+/+/heartbeat",
-        "+/iot/+/+/event/post",
-        "+/iot/+/+/event/post_reply",
-        "+/iot/+/+/property/post",
-        "+/iot/+/+/property/set_reply",
-        "+/iot/+/+/ota/progress",
+        "$T/+/+/v1/heartbeat",
+        "$T/+/+/v1/event/post",
+        "$T/+/+/v1/event/post_reply",
+        "$T/+/+/v1/property/post",
+        "$T/+/+/v1/property/set_reply",
+        "$T/+/+/v1/ota/progress",
+        "$T/+/+/v1/status",
     };
 }
 
@@ -37,6 +38,10 @@ std::vector<std::string> MessageRouter::subscription_topics() {
 // ============================================================
 void MessageRouter::on_message(const std::string& topic, const std::string& payload) {
     ParsedTopic pt = ParsedTopic::parse(topic);
+    // MQTT log: print every received message
+    std::string preview = payload.size() > 200 ? payload.substr(0, 200) + "..." : payload;
+    std::cout << "[MQTT] ← " << topic << " | " << preview << std::endl;
+
     if (!pt.valid) {
         std::cerr << "[Router] Invalid topic: " << topic << std::endl;
         return;
@@ -59,12 +64,29 @@ void MessageRouter::on_message(const std::string& topic, const std::string& payl
 }
 
 // ============================================================
+// Helpers
+// ============================================================
+static std::string resolve_tenant(DeviceManager* mgr, const std::string& did) {
+    if (!mgr) return "default";
+    auto d = mgr->find_device_by_id(did);
+    return d ? d->tenant_id : "default";
+}
+static std::string resolve_product(DeviceManager* mgr, const std::string& did) {
+    if (!mgr) return "";
+    auto d = mgr->find_device_by_id(did);
+    return d ? d->product_id : "";
+}
+
+// ============================================================
 // Handlers
 // ============================================================
 void MessageRouter::handle_heartbeat(const ParsedTopic& pt, const std::string& payload) {
-    // payload JSON: {device_id, timestamp, status, firmware_version, signal_strength, alarm_count}
     if (device_mgr_) {
-        device_mgr_->process_heartbeat(pt.tenant_id, pt.device_id, pt.product_id, payload);
+        device_mgr_->process_heartbeat(
+            resolve_tenant(device_mgr_, pt.device_id),
+            pt.device_id,
+            resolve_product(device_mgr_, pt.device_id),
+            payload);
     }
 }
 
@@ -110,12 +132,12 @@ void MessageRouter::handle_event(const ParsedTopic& pt, const std::string& paylo
     } else if (event_type == "fault_alert") {
         // Fault alert reported by device via MQTT (SRS 4.1.2 item 2)
         if (fault_mgr_) {
-            fault_mgr_->on_fault_event(pt.tenant_id, pt.device_id, payload);
+            fault_mgr_->on_fault_event(resolve_tenant(device_mgr_, pt.device_id), pt.device_id, payload);
         }
     } else if (event_type == "device_status") {
-        // Device status change reported via MQTT
         if (device_mgr_) {
-            device_mgr_->process_property(pt.tenant_id, pt.device_id, pt.product_id, payload);
+            device_mgr_->process_property(resolve_tenant(device_mgr_, pt.device_id),
+                pt.device_id, resolve_product(device_mgr_, pt.device_id), payload);
         }
     } else {
         std::cerr << "[Router] Unknown event_type: " << event_type
@@ -124,29 +146,31 @@ void MessageRouter::handle_event(const ParsedTopic& pt, const std::string& paylo
 }
 
 void MessageRouter::handle_property(const ParsedTopic& pt, const std::string& payload) {
-    // payload JSON: reported device properties
     if (device_mgr_) {
-        device_mgr_->process_property(pt.tenant_id, pt.device_id, pt.product_id, payload);
+        device_mgr_->process_property(resolve_tenant(device_mgr_, pt.device_id),
+            pt.device_id, resolve_product(device_mgr_, pt.device_id), payload);
     }
 }
 
 void MessageRouter::handle_status(const ParsedTopic& pt, const std::string& payload) {
-    // MQTT Will Message or device online/offline status
-    // payload: {"status":"online"|"offline"}
     if (device_mgr_) {
-        std::string st = JsonHelper::get_string(payload, "status");
-        if (st == "offline") {
-            device_mgr_->update_device_status(pt.tenant_id, pt.device_id, DeviceStatus::OFFLINE);
-        } else if (st == "online") {
-            device_mgr_->update_device_status(pt.tenant_id, pt.device_id, DeviceStatus::IDLE);
+        std::string tid = resolve_tenant(device_mgr_, pt.device_id);
+        std::string st = JsonHelper::get_string(payload, "network_status");
+        if (st.empty()) st = JsonHelper::get_string(payload, "status");
+        if (st == "offline" || st == "1") {
+            device_mgr_->update_device_status(tid, pt.device_id,
+                NetworkStatus::OFFLINE, WorkStatus::IDLE);
+        } else {
+            device_mgr_->update_device_status(tid, pt.device_id,
+                NetworkStatus::ONLINE, WorkStatus::IDLE);
         }
     }
 }
 
 void MessageRouter::handle_ota_progress(const ParsedTopic& pt, const std::string& payload) {
-    // payload JSON: {version, progress, stage, status}
     if (ota_mgr_) {
-        ota_mgr_->process_ota_progress(pt.tenant_id, pt.device_id, payload);
+        ota_mgr_->process_ota_progress(resolve_tenant(device_mgr_, pt.device_id),
+            pt.device_id, payload);
     }
 }
 

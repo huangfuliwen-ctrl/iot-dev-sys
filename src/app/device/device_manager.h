@@ -43,13 +43,15 @@ public:
     StatusCode remove_device(const std::string& tenant_id, const std::string& device_id);
     StatusCode update_device_status(const std::string& tenant_id,
                                      const std::string& device_id,
-                                     DeviceStatus status);
+                                     NetworkStatus net_st,
+                                     WorkStatus work_st);
     StatusCode migrate_device(const std::string& device_id,
                                const std::string& new_tenant);
 
     // ======== Query ========
     std::optional<Device> get_device(const std::string& tenant_id,
                                       const std::string& device_id) const;
+    std::optional<Device> find_device_by_id(const std::string& device_id) const;
     std::vector<Device> list_devices(const std::string& tenant_id) const;
     std::vector<Device> list_all_devices() const;
     std::vector<Device> list_offline_devices(int timeout_sec = 180) const;

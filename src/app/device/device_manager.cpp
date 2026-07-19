@@ -29,7 +29,8 @@ void DeviceManager::process_heartbeat(const std::string& tenant_id,
         dev.tenant_id  = tenant_id;
         dev.device_id  = device_id;
         dev.product_id = product_id;
-        dev.status     = DeviceStatus::IDLE;
+        dev.network_status = NetworkStatus::ONLINE;
+        dev.work_status    = WorkStatus::IDLE;
         dev.last_heartbeat_at = std::chrono::duration_cast<std::chrono::seconds>(
             std::chrono::system_clock::now().time_since_epoch()).count();
         dev.activated  = true;
@@ -37,11 +38,11 @@ void DeviceManager::process_heartbeat(const std::string& tenant_id,
         std::cout << "[DeviceMgr] Auto-registered device: "
                   << tenant_id << "/" << device_id << std::endl;
     } else {
-        // Update heartbeat timestamp and status
+        // Update heartbeat timestamp — device is online
         it->second.last_heartbeat_at = std::chrono::duration_cast<std::chrono::seconds>(
             std::chrono::system_clock::now().time_since_epoch()).count();
-        it->second.status = DeviceStatus::IDLE; // TODO: parse actual status from payload
-        // TODO: Update firmware_version, signal_strength from payload
+        it->second.network_status = NetworkStatus::ONLINE;
+        // TODO: parse work_status, firmware_version, signal_strength from payload
     }
 
     // TODO: Persist to database asynchronously
@@ -89,7 +90,8 @@ StatusCode DeviceManager::remove_device(const std::string& tenant_id,
 
 StatusCode DeviceManager::update_device_status(const std::string& tenant_id,
                                                 const std::string& device_id,
-                                                DeviceStatus status) {
+                                                NetworkStatus net_st,
+                                                WorkStatus work_st) {
     std::lock_guard<std::mutex> lock(mutex_);
     auto td_it = tenants_.find(tenant_id);
     if (td_it == tenants_.end()) return StatusCode::DEV_NOT_ACTIVATED;
@@ -97,7 +99,8 @@ StatusCode DeviceManager::update_device_status(const std::string& tenant_id,
     auto dev_it = td_it->second.map.find(device_id);
     if (dev_it == td_it->second.map.end()) return StatusCode::DEV_NOT_ACTIVATED;
 
-    dev_it->second.status = status;
+    dev_it->second.network_status = net_st;
+    dev_it->second.work_status    = work_st;
     return StatusCode::OK;
 }
 
@@ -116,6 +119,15 @@ StatusCode DeviceManager::migrate_device(const std::string& device_id,
         }
     }
     return StatusCode::DEV_NOT_ACTIVATED;
+}
+
+std::optional<Device> DeviceManager::find_device_by_id(const std::string& device_id) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    for (const auto& [tid, td] : tenants_) {
+        auto it = td.map.find(device_id);
+        if (it != td.map.end()) return it->second;
+    }
+    return std::nullopt;
 }
 
 // ============================================================
@@ -178,10 +190,8 @@ std::vector<Device> DeviceManager::list_offline_devices(int timeout_sec) const {
 void DeviceManager::check_offline_devices() {
     auto offline = list_offline_devices();
     for (const auto& dev : offline) {
-        // Update status
-        update_device_status(dev.tenant_id, dev.device_id, DeviceStatus::OFFLINE);
-
-        // Notify
+        update_device_status(dev.tenant_id, dev.device_id,
+                             NetworkStatus::OFFLINE, dev.work_status);
         if (offline_cb_) {
             offline_cb_(dev.tenant_id, dev.device_id);
         }

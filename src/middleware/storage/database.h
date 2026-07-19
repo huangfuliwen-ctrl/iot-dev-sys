@@ -114,11 +114,16 @@ public:
     std::vector<AccountInfo> list_accounts_db();
 
     // ======== Maintenance ========
+    // MQTT Tenant Config (DB-backed, replaces text files)
+    std::string load_tenant_config(const std::string& field);
+    StatusCode save_tenant_config(const std::string& key, const std::string& name);
+
     StatusCode vacuum();
     StatusCode clean_expired_data(int retention_days);
     StatusCode backup(const std::string& backup_path);
 
 private:
+    StatusCode create_mqtt_tenant_config_table();
     StatusCode init_schema();
     StatusCode migrate_if_needed();
     StatusCode create_tenants_table();

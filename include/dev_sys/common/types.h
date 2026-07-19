@@ -123,15 +123,22 @@ private:
 };
 
 // ============================================================
-// Device Status (per-device)
+// Device Network Status (MQTT connection state)
 // ============================================================
-enum class DeviceStatus : uint8_t {
+enum class NetworkStatus : uint8_t {
+    ONLINE  = 0,
+    OFFLINE = 1,
+};
+
+// ============================================================
+// Device Work Status (operational state)
+// ============================================================
+enum class WorkStatus : uint8_t {
     IDLE        = 0,
     BREWING     = 1,
     FAULT       = 2,
     UPGRADING   = 3,
     MAINTENANCE = 4,
-    OFFLINE     = 5,
 };
 
 // ============================================================
@@ -266,7 +273,8 @@ struct Device {
     std::string  device_id;
     std::string  product_id;
     DeviceType   type = DeviceType::OTHER;
-    DeviceStatus status = DeviceStatus::OFFLINE;
+    NetworkStatus network_status = NetworkStatus::OFFLINE;  // MQTT connection state
+    WorkStatus   work_status   = WorkStatus::IDLE;          // operational state
     std::string  firmware_version;
     std::string  mac_address;
     std::string  model;
@@ -284,6 +292,7 @@ struct Device {
 struct ActivationRequest {
     std::string  uid;         // hardware unique ID (chip serial / eFuse)
     std::string  model_key;   // device model key (ULID, e.g. "01KX5M2KM8EBW9G1CWVMJ94TSK")
+    // Note: tenant_id is NOT accepted from device — server assigns based on DB config
 };
 
 // Response: cloud → device
@@ -317,7 +326,8 @@ struct ParsedTopic {
     bool valid = false;
 
     // Parse from received topic string
-    // Format: {tenant}/iot/{product_id}/{device_id}/{type}/...
+    // Format A: {device_id}/v1/{type}/...
+    // Format B: $T/{tenant}/{device_id}/v1/{type}/...  (broker prefix)
     static ParsedTopic parse(const std::string& topic) {
         ParsedTopic pt;
         pt.raw_topic = topic;
@@ -329,36 +339,37 @@ struct ParsedTopic {
             parts.push_back(segment);
         }
 
-        // Expected minimum: tenant/iot/product/device/type
-        if (parts.size() < 5) return pt;
+        if (parts.size() < 3) return pt;
 
-        pt.tenant_id  = parts[0];
-        // parts[1] should be "iot"
-        pt.product_id = parts[2];
-        pt.device_id  = parts[3];
-        pt.message_type = parts[4];  // "heartbeat" / "event" / "property" / "ota" / "command"
-
-        if (parts.size() >= 6) {
-            if (parts[4] == "command") {
-                pt.command = parts[5];
-            } else {
-                // e.g. "post" or "progress" or "set_reply"
-                pt.command = parts[5];
-            }
+        int offset = 0;
+        // Detect broker prefix: $T/{tenant}/...
+        if (parts[0] == "$T" && parts.size() >= 5) {
+            pt.tenant_id  = parts[1];
+            offset = 2;
         }
 
-        pt.valid = (parts[1] == "iot" && !pt.tenant_id.empty()
-                    && !pt.device_id.empty() && !pt.message_type.empty());
+        // device_id at parts[offset], "v1" at parts[offset+1], type at parts[offset+2]
+        pt.device_id    = parts[offset];
+        pt.message_type = (offset + 2 < static_cast<int>(parts.size())) ? parts[offset + 2] : "";
+
+        if (offset + 3 < static_cast<int>(parts.size())) {
+            pt.command = parts[offset + 3];
+        }
+
+        std::string ver = (offset + 1 < static_cast<int>(parts.size())) ? parts[offset + 1] : "";
+        pt.valid = (ver == "v1" && !pt.device_id.empty() && !pt.message_type.empty());
         return pt;
     }
 
     // Build downlink topic for sending to a specific device
     static std::string build_downlink(const std::string& tenant_id,
-                                       const std::string& product_id,
+                                       const std::string& /*product_id*/,
                                        const std::string& device_id,
                                        const std::string& type,
                                        const std::string& sub = "") {
-        std::string topic = tenant_id + "/iot/" + product_id + "/" + device_id + "/" + type;
+        // $T/{tenant}/{device}/v1/{type}/...
+        std::string t = tenant_id.empty() ? "default" : tenant_id;
+        std::string topic = "$T/" + t + "/" + device_id + "/v1/" + type;
         if (!sub.empty()) topic += "/" + sub;
         return topic;
     }
@@ -438,7 +449,8 @@ struct HeartbeatData {
     std::string  tenant_id;
     std::string  device_id;
     std::string  timestamp;
-    DeviceStatus status = DeviceStatus::OFFLINE;
+    NetworkStatus network_status = NetworkStatus::OFFLINE;
+    WorkStatus   work_status   = WorkStatus::IDLE;
     std::string  firmware_version;
     int32_t      signal_strength = 0;
     int32_t      alarm_count = 0;

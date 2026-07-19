@@ -4,6 +4,8 @@
     "broker_port": 1883,
     "broker_api_port": 8080,
     "client_id": "cloud-platform-service-001",
+    "username": "devsys/cloud-platform",
+    "password": "",
     "keep_alive_sec": 60,
     "qos": 1,
     "clean_session": false,
@@ -11,12 +13,13 @@
     "reconnect_max_ms": 60000,
 
     "wildcard_subscriptions": [
-        "+/iot/+/+/heartbeat",
-        "+/iot/+/+/event/post",
-        "+/iot/+/+/event/post_reply",
-        "+/iot/+/+/property/post",
-        "+/iot/+/+/property/set_reply",
-        "+/iot/+/+/ota/progress"
+        "$T/+/+/v1/heartbeat",
+        "$T/+/+/v1/event/post",
+        "$T/+/+/v1/event/post_reply",
+        "$T/+/+/v1/property/post",
+        "$T/+/+/v1/property/set_reply",
+        "$T/+/+/v1/ota/progress",
+        "$T/+/+/v1/status"
     ],
 
     "service_topics": {
@@ -24,8 +27,8 @@
     },
 
     "topic_format": {
-        "_note": "上行topic格式: {tenant_id}/iot/{product_id}/{device_id}/{type}/{sub}",
-        "example_uplink": "tenant_1/iot/coffee_v1/device_001/heartbeat",
-        "example_downlink": "tenant_1/iot/coffee_v1/device_001/ota/notify"
+        "_note": "上行topic格式: {device_id}/v1/{type}/{sub}，下行: {device_id}/v1/{type}",
+        "example_uplink": "dev_001/v1/heartbeat",
+        "example_downlink": "dev_001/v1/ota/notify"
     }
 }

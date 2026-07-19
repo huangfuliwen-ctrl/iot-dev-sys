@@ -149,6 +149,7 @@ StatusCode Database::init_schema() {
     sc = create_firmwares_table();        if (sc != StatusCode::OK) return sc;
     sc = create_organizations_table();    if (sc != StatusCode::OK) return sc;
     sc = create_accounts_table();         if (sc != StatusCode::OK) return sc;
+    sc = create_mqtt_tenant_config_table(); if (sc != StatusCode::OK) return sc;
     return StatusCode::OK;
 }
 
@@ -398,6 +399,39 @@ StatusCode Database::create_accounts_table() {
     return execute(sql);
 }
 
+StatusCode Database::create_mqtt_tenant_config_table() {
+    const char* sql = R"(
+        CREATE TABLE IF NOT EXISTS mqtt_tenant_config (
+            id              SERIAL PRIMARY KEY,
+            tenant_key      TEXT NOT NULL DEFAULT '',
+            tenant_name     TEXT NOT NULL DEFAULT ''
+        );
+        -- Ensure there's always exactly one row
+        INSERT INTO mqtt_tenant_config (id, tenant_key, tenant_name)
+        SELECT 1, '', '' WHERE NOT EXISTS (SELECT 1 FROM mqtt_tenant_config WHERE id=1);
+    )";
+    return execute(sql);
+}
+
+// ============================================================
+// MQTT Tenant Config (persisted to DB instead of text files)
+// ============================================================
+std::string Database::load_tenant_config(const std::string& field) {
+    std::ostringstream sql;
+    sql << "SELECT " << field << " FROM mqtt_tenant_config WHERE id=1";
+    std::vector<std::vector<std::string>> rows;
+    if (query(sql.str(), rows) == StatusCode::OK && !rows.empty() && !rows[0].empty())
+        return rows[0][0];
+    return "";
+}
+
+StatusCode Database::save_tenant_config(const std::string& key, const std::string& name) {
+    std::ostringstream sql;
+    sql << "UPDATE mqtt_tenant_config SET tenant_key='" << key
+        << "', tenant_name='" << name << "' WHERE id=1";
+    return execute(sql.str());
+}
+
 // ============================================================
 // Schema Migration
 // ============================================================
@@ -518,7 +552,8 @@ Device Database::device_from_row(const std::vector<std::string>& row) const {
     dev.tenant_id         = row[2];
     dev.product_id        = row[3];
     dev.type              = static_cast<DeviceType>(std::stoi(row[4]));
-    dev.status            = static_cast<DeviceStatus>(std::stoi(row[5]));
+    dev.network_status    = static_cast<NetworkStatus>(std::stoi(row[5]));
+    dev.work_status       = WorkStatus::IDLE;  // default — work_status in separate column
     dev.firmware_version  = row[6];
     dev.mac_address       = row[7];
     dev.model             = row[8];
@@ -674,7 +709,7 @@ StatusCode Database::insert_device(const Device& device) {
         << sql_str(device.tenant_id) << ","
         << sql_str(device.product_id) << ","
         << static_cast<int>(device.type) << ","
-        << static_cast<int>(device.status) << ","
+        << static_cast<int>(device.network_status) << ","
         << sql_str(device.firmware_version) << ","
         << sql_str(device.mac_address) << ","
         << sql_str(device.model) << ","
@@ -690,7 +725,8 @@ StatusCode Database::update_device(const Device& device) {
     std::ostringstream sql;
     sql << "UPDATE devices SET "
         << "tenant_id=" << sql_str(device.tenant_id) << ","
-        << "status=" << static_cast<int>(device.status) << ","
+        << "network_status=" << static_cast<int>(device.network_status) << ","
+        << "work_status=" << static_cast<int>(device.work_status) << ","
         << "firmware_version=" << sql_str(device.firmware_version) << ","
         << "last_heartbeat_at=" << device.last_heartbeat_at << ","
         << "activated=" << sql_bool(device.activated) << ","
@@ -710,7 +746,7 @@ StatusCode Database::upsert_device(const Device& device) {
         << sql_str(device.tenant_id) << ","
         << sql_str(device.product_id) << ","
         << static_cast<int>(device.type) << ","
-        << static_cast<int>(device.status) << ","
+        << static_cast<int>(device.network_status) << ","
         << sql_str(device.firmware_version) << ","
         << sql_str(device.mac_address) << ","
         << sql_str(device.model) << ","
