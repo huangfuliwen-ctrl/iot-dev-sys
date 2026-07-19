@@ -51,6 +51,8 @@ void MessageRouter::on_message(const std::string& topic, const std::string& payl
         handle_property(pt, payload);
     } else if (pt.message_type == "ota") {
         handle_ota_progress(pt, payload);
+    } else if (pt.message_type == "status") {
+        handle_status(pt, payload);
     } else {
         std::cerr << "[Router] Unknown message type: " << pt.message_type << std::endl;
     }
@@ -125,6 +127,19 @@ void MessageRouter::handle_property(const ParsedTopic& pt, const std::string& pa
     // payload JSON: reported device properties
     if (device_mgr_) {
         device_mgr_->process_property(pt.tenant_id, pt.device_id, pt.product_id, payload);
+    }
+}
+
+void MessageRouter::handle_status(const ParsedTopic& pt, const std::string& payload) {
+    // MQTT Will Message or device online/offline status
+    // payload: {"status":"online"|"offline"}
+    if (device_mgr_) {
+        std::string st = JsonHelper::get_string(payload, "status");
+        if (st == "offline") {
+            device_mgr_->update_device_status(pt.tenant_id, pt.device_id, DeviceStatus::OFFLINE);
+        } else if (st == "online") {
+            device_mgr_->update_device_status(pt.tenant_id, pt.device_id, DeviceStatus::IDLE);
+        }
     }
 }
 

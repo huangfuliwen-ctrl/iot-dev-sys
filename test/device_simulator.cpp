@@ -64,11 +64,13 @@ struct Http {
 struct Mqtt {
     int fd_=-1; std::string h_; int p_=1883; std::atomic<bool> ok_{false};
     uint16_t pid_=1; std::string err_;
+    std::string will_topic_, will_payload_;
     static std::string el(uint32_t l){ std::string r; do{uint8_t b=l&0x7F;l>>=7;if(l)b|=0x80;r+=(char)b;}while(l); return r; }
     static std::string es(const std::string& s){ uint16_t l=htons(s.size()); return std::string((char*)&l,2)+s; }
     bool re(void* b,size_t n){ size_t o=0; auto*p=(char*)b; while(o<n){auto r=recv(fd_,p+o,n-o,0);if(r<=0)return false;o+=r;} return true; }
     bool rp(uint8_t& t,std::string& pl){ uint8_t h; if(!re(&h,1))return false; t=h>>4; uint32_t l=0,sh=0; while(1){uint8_t b;if(!re(&b,1))return false;l|=(b&0x7F)<<sh;sh+=7;if(!(b&0x80))break;} pl.resize(l); if(l>0&&!re(&pl[0],l))return false; return true; }
 public:
+    void set_will(const std::string& t, const std::string& m){ will_topic_=t; will_payload_=m; }
     bool conn(const std::string& uri,const std::string& cid,const std::string& u,const std::string& p){
         auto s=uri; if(s.find("tcp://")==0)s=s.substr(6); else if(s.find("ssl://")==0||s.find("tls://")==0)s=s.substr(6); else if(s.find("mqtt://")==0)s=s.substr(7);
         auto c=s.find(':'); h_=(c!=std::string::npos)?s.substr(0,c):s; p_=(c!=std::string::npos)?std::stoi(s.substr(c+1)):1883;
@@ -78,12 +80,17 @@ public:
         if(getaddrinfo(h_.c_str(),std::to_string(p_).c_str(),&h,&res)!=0){err_="DNS: "+h_+" not found"; close(fd_);fd_=-1;return false;}
         sockaddr_in a{}; memcpy(&a,res->ai_addr,sizeof(a)); freeaddrinfo(res);
         if(::connect(fd_,(sockaddr*)&a,sizeof(a))<0){err_="TCP connect refused "+h_+":"+std::to_string(p_); close(fd_);fd_=-1;return false;}
-        uint8_t flg=0x02; if(!u.empty()){flg|=0x80; if(!p.empty())flg|=0x40;}
+        bool has_will = !will_topic_.empty() && !will_payload_.empty();
+        uint8_t flg=0x02; // clean session
+        if(!u.empty()){flg|=0x80; if(!p.empty())flg|=0x40;}
+        if(has_will){ flg|=0x04; flg|=(1<<3); } // Will flag + Will QoS 1 + Will Retain
         std::string v;
         v.push_back(0x00); v.push_back(0x04); v+="MQTT";
         v.push_back(0x04); v.push_back((char)flg);
         v.push_back(0x00); v.push_back(0x3C); // keepalive 60s
-        v+=es(cid); if(!u.empty()){v+=es(u); if(!p.empty())v+=es(p);}
+        v+=es(cid);
+        if(has_will){ v+=es(will_topic_); v+=es(will_payload_); }
+        if(!u.empty()){v+=es(u); if(!p.empty())v+=es(p);}
         std::string pk; pk+=(char)0x10; pk+=el(v.size()); pk+=v;
         // 打印发送的包（hex）
         std::cerr<<"[MQTT DEBUG] CONNECT packet ("<<pk.size()<<" bytes): ";
@@ -167,13 +174,17 @@ struct Sim {
     bool connect_mqtt(){
         if(c_.no_mqtt){ L("⚠ MQTT skipped"); return true; }
         std::string mqtt_user = (tname_.empty() ? tid_ : tname_) + "/" + did_;
+        std::string base=tid_+"/iot/"+pid_+"/"+did_;
         L("══════ 阶段2: MQTT连接 ══════");
         L("  broker:   "+bri_);
         L("  clientId: "+did_);
         L("  username: "+mqtt_user);
+        // Set Will Message: broker publishes "offline" if device disconnects abnormally
+        mqtt_.set_will(base+"/status", "{\"status\":\"offline\"}");
         if(!mqtt_.conn(bri_,did_,mqtt_user,"")){ L("✗ MQTT失败: "+mqtt_.error()); return false; }
-        std::string base=tid_+"/iot/"+pid_+"/"+did_;
         mqtt_.sub(base+"/property/set"); mqtt_.sub(base+"/ota/notify"); mqtt_.sub(base+"/command/+");
+        // Publish retained "online" — cloud sees device is alive via MQTT state
+        mqtt_.pub(base+"/status","{\"status\":\"online\"}",1);
         L("✓ MQTT已连接, 已订阅下行Topic");
         mqtt_.pub(base+"/heartbeat","{\"status\":0,\"ts\":\""+U::now()+"\"}");
         return true;

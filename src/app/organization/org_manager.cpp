@@ -206,10 +206,11 @@ StatusCode OrgManager::delete_org(int32_t org_id) {
     // Check children
     if (has_children(org_id)) return StatusCode::ORG_HAS_CHILDREN;
 
-    // Soft delete
-    it->is_active = false;
-    if (db_) db_->update_org_db(*it);
-    delete_tenant_from_broker(it->tenant_id);
+    // Hard delete
+    std::string tid = it->tenant_id;
+    orgs_.erase(it);
+    if (db_) db_->delete_org_db(org_id);
+    delete_tenant_from_broker(tid);
     return StatusCode::OK;
 }
 

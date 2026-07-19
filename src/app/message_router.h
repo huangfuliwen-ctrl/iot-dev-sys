@@ -73,6 +73,7 @@ private:
     void handle_event(const ParsedTopic& pt, const std::string& payload);
     void handle_property(const ParsedTopic& pt, const std::string& payload);
     void handle_ota_progress(const ParsedTopic& pt, const std::string& payload);
+    void handle_status(const ParsedTopic& pt, const std::string& payload);
 
     DeviceManager* device_mgr_ = nullptr;
     OrderManager*  order_mgr_  = nullptr;

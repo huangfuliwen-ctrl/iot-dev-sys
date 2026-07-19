@@ -291,6 +291,22 @@ int main(int argc, char* argv[]) {
             return ApiServer::json_response(resp.success ? 201 : 400, json.str());
         });
 
+    // HTTP heartbeat (MQTT fallback for devices without MQTT)
+    api.post("/api/v1/device/heartbeat",
+        [&device_mgr](const HttpRequest& req) -> HttpResponse {
+            std::string did  = JsonHelper::get_string(req.body, "device_id");
+            std::string tid  = "default";
+            std::string pid  = "coffee_v1";
+            // Find device to get its tenant/product
+            for (const auto& d : device_mgr.list_all_devices()) {
+                if (d.device_id == did) { tid = d.tenant_id; pid = d.product_id; break; }
+            }
+            if (did.empty())
+                return ApiServer::error_response(400, 1001, "device_id required");
+            device_mgr.process_heartbeat(tid, did, pid, req.body);
+            return ApiServer::json_response(200, R"({"code":0,"message":"success"})");
+        });
+
     // Device status query (supports org_scope filtering via Bearer token)
     api.get("/api/v1/device/status",
         [&device_mgr, &acct_mgr, &org_mgr](const HttpRequest& req) -> HttpResponse {
@@ -2341,6 +2357,9 @@ int main(int argc, char* argv[]) {
         mqtt.subscribe(t, 1);
         log_mgr.info("main", "Subscribed: " + t);
     }
+    // 额外订阅设备状态Topic（Will Message用）
+    mqtt.subscribe("+/iot/+/+/status", 1);
+    log_mgr.info("main", "Subscribed: +/iot/+/+/status");
 
     // 发布服务上线通知
     mqtt.publish("cloud-platform/status",
