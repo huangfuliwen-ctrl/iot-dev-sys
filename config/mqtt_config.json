@@ -1,33 +1,37 @@
 {
-    "_comment": "云平台服务 MQTT 配置 — 特权客户端，通配符订阅所有租户设备消息",
+    "_comment": "\u4e91\u5e73\u53f0\u670d\u52a1 MQTT \u914d\u7f6e",
     "broker_host": "127.0.0.1",
     "broker_port": 1883,
     "broker_api_port": 8080,
     "client_id": "cloud-platform-service-001",
-    "username": "devsys/cloud-platform",
+    "username": "coffeeusr/cloud",
     "password": "",
     "keep_alive_sec": 60,
     "qos": 1,
     "clean_session": false,
     "reconnect_base_ms": 1000,
     "reconnect_max_ms": 60000,
-
     "wildcard_subscriptions": [
-        "$T/+/+/v1/heartbeat",
-        "$T/+/+/v1/event/post",
-        "$T/+/+/v1/event/post_reply",
-        "$T/+/+/v1/property/post",
-        "$T/+/+/v1/property/set_reply",
-        "$T/+/+/v1/ota/progress",
-        "$T/+/+/v1/status"
+        "+/v1/heartbeat",
+        "+/v1/event/post",
+        "+/v1/event/post_reply",
+        "+/v1/property/post",
+        "+/v1/property/set_reply",
+        "+/v1/ota/progress",
+        "+/v1/status",
+        "+/v1/heartbeat",
+        "+/v1/event/post",
+        "+/v1/event/post_reply",
+        "+/v1/property/post",
+        "+/v1/property/set_reply",
+        "+/v1/ota/progress",
+        "+/v1/status"
     ],
-
     "service_topics": {
         "status": "cloud-platform/status"
     },
-
     "topic_format": {
-        "_note": "上行topic格式: {device_id}/v1/{type}/{sub}，下行: {device_id}/v1/{type}",
+        "_note": "\u4e0a\u884c: {device_id}/v1/{type}/{sub}, \u4e0b\u884c: {device_id}/v1/{type}",
         "example_uplink": "dev_001/v1/heartbeat",
         "example_downlink": "dev_001/v1/ota/notify"
     }

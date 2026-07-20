@@ -23,13 +23,13 @@ void MessageRouter::set_recipe_manager(RecipeManager* mgr) { recipe_mgr_ = mgr; 
 // ============================================================
 std::vector<std::string> MessageRouter::subscription_topics() {
     return {
-        "$T/+/+/v1/heartbeat",
-        "$T/+/+/v1/event/post",
-        "$T/+/+/v1/event/post_reply",
-        "$T/+/+/v1/property/post",
-        "$T/+/+/v1/property/set_reply",
-        "$T/+/+/v1/ota/progress",
-        "$T/+/+/v1/status",
+        "+/v1/heartbeat",
+        "+/v1/event/post",
+        "+/v1/event/post_reply",
+        "+/v1/property/post",
+        "+/v1/property/set_reply",
+        "+/v1/ota/progress",
+        "+/v1/status",
     };
 }
 
