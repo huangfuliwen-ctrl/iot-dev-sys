@@ -19,7 +19,7 @@ void FaultManager::on_fault_event(const std::string& tenant_id,
     std::string level = JsonHelper::get_string(payload_json, "level");
     fault.level      = (level == "error") ? FaultLevel::ERROR : FaultLevel::WARNING;
     fault.description= JsonHelper::get_string(payload_json, "description");
-    fault.timestamp  = JsonHelper::get_string(payload_json, "timestamp");
+    fault.timestamp  = std::to_string(JsonHelper::get_int(payload_json, "ts", 0));
     add_fault(fault);
 }
 

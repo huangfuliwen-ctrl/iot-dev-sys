@@ -129,7 +129,7 @@
 ```json
 {
     "device_id": "dev_a1b2c3d4e5f6a7b8",
-    "timestamp": "2026-07-20T12:00:00Z",
+    "ts": 1751234567,
     "network_status": 0,
     "work_status": 0,
     "firmware_version": "v2.0.5",
@@ -141,7 +141,7 @@
 | 字段 | 类型 | 必填 | 说明 |
 |------|------|------|------|
 | device_id | string | 是 | 设备ID |
-| timestamp | string | 是 | ISO 8601 UTC 时间 |
+| ts | int64 | 是 | Unix 时间戳（秒） |
 | network_status | int | 是 | 网络状态: 0=在线, 1=离线 |
 | work_status | int | 是 | 工作状态（见下表） |
 | firmware_version | string | 是 | 当前固件版本 |
@@ -175,7 +175,7 @@
     "recipe_id": "REC-AMERICANO-001",
     "recipe_name": "经典美式",
     "cup_size": "中",
-    "timestamp": "2026-07-20T12:06:00Z"
+    "ts": 1751234567
 }
 ```
 
@@ -186,7 +186,7 @@
 | recipe_id | string | 是 | 配方ID，如 `REC-AMERICANO-001` |
 | recipe_name | string | 否 | 饮品名称，如 `经典美式` |
 | cup_size | string | 否 | 杯型：小/中/大 |
-| timestamp | string | 是 | 制作完成时间（ISO 8601 UTC） |
+| ts | int64 | 是 | 制作完成时间（Unix时间戳，秒） |
 
 > 订单仅做记录用途，云端收到后入库即可，无需返回确认。
 
@@ -204,7 +204,7 @@
     "fault_code": 5,
     "level": "error",
     "description": "机箱底部漏水传感器触发",
-    "timestamp": "2026-07-20T12:10:00Z",
+    "ts": 1751234567,
     "sensor_snapshot": {
         "leak_sensor": true,
         "zone": "bottom_tray"
@@ -220,7 +220,7 @@
     "fault_code": 8,
     "level": "warning",
     "description": "咖啡豆余量不足：当前120g，阈值150g",
-    "timestamp": "2026-07-20T12:10:00Z",
+    "ts": 1751234567,
     "sensor_snapshot": {
         "bean_remaining_g": 120,
         "threshold_g": 150
@@ -257,7 +257,7 @@
     "event_type": "fault_resolved",
     "fault_code": 3,
     "level": "error",
-    "timestamp": "2026-07-20T12:15:00Z"
+    "ts": 1751234567
 }
 ```
 
@@ -266,7 +266,7 @@
 | event_type | string | 是 | 固定值 `"fault_resolved"` |
 | fault_code | int | 是 | 恢复的故障码（E001-E005 / W001-W003） |
 | level | string | 是 | 故障级别：`"warning"` / `"error"` |
-| timestamp | string | 是 | 恢复时间（ISO 8601 UTC） |
+| ts | int64 | 是 | 恢复时间（Unix时间戳，秒） |
 
 > 后端根据 `fault_code` 精确定位并清除对应告警，`level` 辅助前端展示。
 
@@ -278,7 +278,7 @@
 {
     "event_type": "maintenance_start",
     "reason": "定期维护",
-    "timestamp": "2026-07-20T12:20:00Z"
+    "ts": 1751234567
 }
 ```
 
@@ -287,7 +287,7 @@
 ```json
 {
     "event_type": "maintenance_end",
-    "timestamp": "2026-07-20T12:30:00Z"
+    "ts": 1751234567
 }
 ```
 
@@ -481,7 +481,7 @@ MQTT 不可用时的降级通道，批量上传事件。
 ```json
 {
     "command": "restart",
-    "timestamp": "2026-07-20T12:00:00Z"
+    "ts": 1751234567
 }
 ```
 

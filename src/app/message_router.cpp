@@ -116,7 +116,7 @@ void MessageRouter::handle_event(const ParsedTopic& pt, const std::string& paylo
             fault.code       = static_cast<FaultCode>(JsonHelper::get_int(payload, "fault_code", 0));
             fault.level      = (level == "error") ? FaultLevel::ERROR : FaultLevel::WARNING;
             fault.description= JsonHelper::get_string(payload, "description");
-            fault.timestamp  = JsonHelper::get_string(payload, "timestamp");
+            fault.timestamp  = std::to_string(JsonHelper::get_int(payload, "ts", 0));
             // sensor_snapshot is optional raw JSON
             fault_mgr_->add_fault(fault);
         }
