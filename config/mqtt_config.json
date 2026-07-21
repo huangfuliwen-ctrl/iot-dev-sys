@@ -4,7 +4,7 @@
     "broker_port": 1883,
     "broker_api_port": 8080,
     "client_id": "cloud-platform-service-001",
-    "username": "coffeeusr/cloud",
+    "username": "coffeeusr",
     "password": "",
     "keep_alive_sec": 60,
     "qos": 1,
