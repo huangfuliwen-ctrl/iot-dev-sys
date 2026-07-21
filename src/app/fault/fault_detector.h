@@ -24,6 +24,7 @@ public:
     void on_fault_event(const std::string& tenant_id,
                         const std::string& device_id,
                         const std::string& payload_json);
+    void add_fault(const FaultInfo& fault);  // pre-parsed fault from router
 
     // Query
     std::vector<FaultInfo> active_faults() const;

@@ -144,24 +144,24 @@ enum class WorkStatus : uint8_t {
 // ============================================================
 // Fault Codes & Levels
 // ============================================================
+// 故障码: W=警告(Warning) E=错误(Error)
 enum class FaultCode : uint8_t {
     NONE               = 0,
-    HEATER_OVERTEMP    = 1,
-    HEATER_NOT_HEATING = 2,
-    PUMP_FAILURE       = 3,
-    MOTOR_STALL        = 4,
-    WATER_LEAK         = 5,
-    SENSOR_OFFLINE     = 6,
-    COMM_FAIL          = 7,
-    MATERIAL_LOW       = 8,
+    // 错误 (Error) — 影响运行，停止制作
+    E001_HEATER_OVERTEMP    = 1,
+    E002_HEATER_NOT_HEATING = 2,
+    E003_PUMP_FAILURE       = 3,
+    E004_MOTOR_STALL        = 4,
+    E005_WATER_LEAK         = 5,
+    // 警告 (Warning) — 不中断运行，提醒运维
+    W001_SENSOR_OFFLINE     = 6,
+    W002_COMM_FAIL          = 7,
+    W003_MATERIAL_LOW       = 8,
 };
 
 enum class FaultLevel : uint8_t {
-    L0_HINT    = 0,
-    L1_MINOR   = 1,
-    L2_GENERAL = 2,
-    L3_SEVERE  = 3,
-    L4_DANGER  = 4,
+    WARNING = 0,  // 警告：不中断运行，提醒运维关注
+    ERROR   = 1,  // 错误：影响运行，停止制作，需人工处理
 };
 
 // ============================================================
@@ -436,7 +436,7 @@ struct FaultInfo {
     std::string  tenant_id;
     std::string  device_id;
     FaultCode    code = FaultCode::NONE;
-    FaultLevel   level = FaultLevel::L0_HINT;
+    FaultLevel   level = FaultLevel::WARNING;
     std::string  description;
     std::string  timestamp;
     std::string  sensor_snapshot;

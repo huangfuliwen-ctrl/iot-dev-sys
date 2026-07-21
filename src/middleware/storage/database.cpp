@@ -636,7 +636,8 @@ FaultInfo Database::fault_from_row(const std::vector<std::string>& row) const {
     f.tenant_id      = row[1];
     f.device_id      = row[2];
     f.code           = static_cast<FaultCode>(std::stoi(row[3]));
-    f.level          = static_cast<FaultLevel>(std::stoi(row[4]));
+    // Legacy mapping: old L3/L4→ERROR, L0-L2→WARNING
+    { int ol = std::stoi(row[4]); f.level = (ol >= 3) ? FaultLevel::ERROR : FaultLevel::WARNING; }
     f.description    = row[5];
     f.timestamp      = row[6];
     f.sensor_snapshot = row.size() > 8 ? row[8] : "";

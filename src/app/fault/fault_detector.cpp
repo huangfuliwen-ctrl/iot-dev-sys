@@ -11,27 +11,32 @@ FaultManager::~FaultManager() = default;
 void FaultManager::on_fault_event(const std::string& tenant_id,
                                    const std::string& device_id,
                                    const std::string& payload_json) {
-    std::lock_guard<std::mutex> lock(mutex_);
-
-    // TODO: Parse JSON payload to extract fault_code, fault_level, description, timestamp, sensor data
-
+    // Legacy: parse JSON payload (used by older clients)
     FaultInfo fault;
     fault.tenant_id = tenant_id;
     fault.device_id = device_id;
-    // fault.code = ... (from JSON)
-    // fault.level = ... (from JSON)
-    // fault.description = ... (from JSON)
-    // fault.timestamp = ... (from JSON)
+    fault.code       = static_cast<FaultCode>(JsonHelper::get_int(payload_json, "fault_code", 0));
+    std::string level = JsonHelper::get_string(payload_json, "level");
+    fault.level      = (level == "error") ? FaultLevel::ERROR : FaultLevel::WARNING;
+    fault.description= JsonHelper::get_string(payload_json, "description");
+    fault.timestamp  = JsonHelper::get_string(payload_json, "timestamp");
+    add_fault(fault);
+}
 
+void FaultManager::add_fault(const FaultInfo& fault) {
+    std::lock_guard<std::mutex> lock(mutex_);
     active_faults_.push_back(fault);
 
-    // L3/L4 immediate alert
-    if (fault.level >= FaultLevel::L3_SEVERE && alert_cb_) {
+    // ERROR level: immediate alert
+    if (fault.level == FaultLevel::ERROR && alert_cb_) {
         alert_cb_(fault);
     }
 
-    // TODO: Persist to fault_log table
-    std::cout << "[FaultMgr] Fault from " << tenant_id << "/" << device_id
+    if (db_) db_->insert_fault(fault);
+
+    std::cout << "[FaultMgr] " << (fault.level == FaultLevel::ERROR ? "ERROR" : "WARNING")
+              << " from " << fault.tenant_id << "/" << fault.device_id
+              << " code=" << static_cast<int>(fault.code)
               << ": " << fault.description << std::endl;
 }
 
@@ -80,8 +85,8 @@ void FaultManager::seed_mock_data() {
     FaultInfo f1;
     f1.tenant_id = "tenant_demo";
     f1.device_id = "dev-coffee-002";
-    f1.code = FaultCode::PUMP_FAILURE;
-    f1.level = FaultLevel::L3_SEVERE;
+    f1.code = FaultCode::E003_PUMP_FAILURE;
+    f1.level = FaultLevel::ERROR;
     f1.description = "水泵流量异常：期望流量 8ml/s，实际 3ml/s";
     f1.timestamp = "2026-06-26T08:15:00Z";
     f1.sensor_snapshot = R"({"flow_rate_ml_s":3.0,"target_flow":8.0,"pump_current_a":0.3})";
@@ -90,8 +95,8 @@ void FaultManager::seed_mock_data() {
     FaultInfo f2;
     f2.tenant_id = "tenant_demo";
     f2.device_id = "dev-coffee-001";
-    f2.code = FaultCode::MATERIAL_LOW;
-    f2.level = FaultLevel::L1_MINOR;
+    f2.code = FaultCode::W003_MATERIAL_LOW;
+    f2.level = FaultLevel::WARNING;
     f2.description = "咖啡豆余量不足：当前 120g，阈值 150g";
     f2.timestamp = "2026-06-26T09:00:00Z";
     f2.sensor_snapshot = R"({"bean_remaining_g":120,"threshold_g":150})";
@@ -100,8 +105,8 @@ void FaultManager::seed_mock_data() {
     FaultInfo f3;
     f3.tenant_id = "tenant_demo";
     f3.device_id = "dev-water-001";
-    f3.code = FaultCode::COMM_FAIL;
-    f3.level = FaultLevel::L2_GENERAL;
+    f3.code = FaultCode::W002_COMM_FAIL;
+    f3.level = FaultLevel::WARNING;
     f3.description = "通信模块连续3次心跳超时，设备可能离线";
     f3.timestamp = "2026-06-26T09:30:00Z";
     f3.sensor_snapshot = R"({"missed_heartbeats":3,"last_seen":"2026-06-26T09:27:00Z"})";
@@ -110,8 +115,8 @@ void FaultManager::seed_mock_data() {
     FaultInfo f4;
     f4.tenant_id = "tenant_demo";
     f4.device_id = "dev-coffee-003";
-    f4.code = FaultCode::WATER_LEAK;
-    f4.level = FaultLevel::L4_DANGER;
+    f4.code = FaultCode::E005_WATER_LEAK;
+    f4.level = FaultLevel::ERROR;
     f4.description = "机箱底部漏水传感器触发，已自动锁定";
     f4.timestamp = "2026-06-26T08:45:00Z";
     f4.sensor_snapshot = R"({"leak_sensor":true,"zone":"bottom_tray","auto_lockdown":true})";

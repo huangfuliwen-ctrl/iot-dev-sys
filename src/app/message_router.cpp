@@ -91,51 +91,45 @@ void MessageRouter::handle_heartbeat(const ParsedTopic& pt, const std::string& p
 }
 
 void MessageRouter::handle_event(const ParsedTopic& pt, const std::string& payload) {
-    // payload JSON: {event_type: "order_status"|"fault_alert"|"device_status", ...data}
     std::string event_type = JsonHelper::get_string(payload, "event_type");
 
-    if (event_type == "order_status") {
-        // Order status change reported by device via MQTT (SRS 4.1.2 item 2)
-        // payload: {event_type:"order_status", order_id:"...", status:<int>, reason:"..."}
+    if (event_type == "order_completed") {
+        // 咖啡机制作完成上报 (咖啡机协议 §3.2.1)
+        // payload: {order_id, recipe_id, recipe_name, cup_size, timestamp}
         if (order_mgr_) {
-            std::string order_id = JsonHelper::get_string(payload, "order_id");
-            int status_code = JsonHelper::get_int(payload, "status", -1);
-            std::string reason = JsonHelper::get_string(payload, "reason");
-
-            if (order_id.empty()) {
-                std::cerr << "[Router] order_status event missing order_id" << std::endl;
-                return;
-            }
-
-            switch (status_code) {
-                case 1: // PAID
-                    order_mgr_->confirm_payment(order_id);
-                    break;
-                case 2: // BREWING
-                    order_mgr_->start_brewing(order_id);
-                    break;
-                case 3: // COMPLETED
-                    order_mgr_->complete_brewing(order_id);
-                    break;
-                case 4: // CANCELLED
-                    order_mgr_->cancel_order(order_id);
-                    break;
-                case 5: // FAILED
-                    order_mgr_->fail_brewing(order_id,
-                        reason.empty() ? "Device reported failure" : reason);
-                    break;
-                default:
-                    std::cerr << "[Router] Unknown order status code: " << status_code << std::endl;
-                    break;
-            }
+            Order order;
+            order.order_id   = JsonHelper::get_string(payload, "order_id");
+            order.device_id  = pt.device_id;
+            order.tenant_id  = resolve_tenant(device_mgr_, pt.device_id);
+            order.recipe_id  = JsonHelper::get_string(payload, "recipe_id");
+            order.cup_size   = JsonHelper::get_string(payload, "cup_size");
+            order.status     = OrderStatus::COMPLETED;
+            order_mgr_->create_order(order);
         }
     } else if (event_type == "fault_alert") {
-        // Fault alert reported by device via MQTT (SRS 4.1.2 item 2)
+        // 故障/警告上报 (咖啡机协议 §3.2.2)
         if (fault_mgr_) {
-            fault_mgr_->on_fault_event(resolve_tenant(device_mgr_, pt.device_id), pt.device_id, payload);
+            std::string level = JsonHelper::get_string(payload, "level");
+            FaultInfo fault;
+            fault.tenant_id  = resolve_tenant(device_mgr_, pt.device_id);
+            fault.device_id  = pt.device_id;
+            fault.code       = static_cast<FaultCode>(JsonHelper::get_int(payload, "fault_code", 0));
+            fault.level      = (level == "error") ? FaultLevel::ERROR : FaultLevel::WARNING;
+            fault.description= JsonHelper::get_string(payload, "description");
+            fault.timestamp  = JsonHelper::get_string(payload, "timestamp");
+            // sensor_snapshot is optional raw JSON
+            fault_mgr_->add_fault(fault);
         }
-    } else if (event_type == "device_status") {
-        if (device_mgr_) {
+    } else if (event_type == "fault_resolved") {
+        // 故障恢复 (咖啡机协议 §3.2.3)
+        if (fault_mgr_) {
+            std::string tid = resolve_tenant(device_mgr_, pt.device_id);
+            FaultCode code = static_cast<FaultCode>(JsonHelper::get_int(payload, "fault_code", 0));
+            fault_mgr_->resolve_fault(tid, pt.device_id, code);
+        }
+    } else if (event_type == "device_status" || event_type == "order_status") {
+        // Legacy events — handle gracefully
+        if (event_type == "device_status" && device_mgr_) {
             device_mgr_->process_property(resolve_tenant(device_mgr_, pt.device_id),
                 pt.device_id, resolve_product(device_mgr_, pt.device_id), payload);
         }
