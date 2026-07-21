@@ -684,7 +684,7 @@ int main(int argc, char* argv[]) {
                 json << R"("total_amount":)" << o.total_amount << ",";
                 json << R"("payment_method":")" << o.payment_method << R"(",)";
                 json << R"("status":)" << static_cast<int>(o.status) << ",";
-                json << R"("created_at":")" << o.created_at << R"(")";
+                json << R"("ts":)" << (o.created_at.empty() ? "0" : o.created_at);
                 if (!o.failure_reason.empty()) {
                     json << R"(,"failure_reason":")" << o.failure_reason << R"(")";
                 }
@@ -711,7 +711,7 @@ int main(int argc, char* argv[]) {
             json << R"("total_amount":)" << o->total_amount << ",";
             json << R"("payment_method":")" << o->payment_method << R"(",)";
             json << R"("status":)" << static_cast<int>(o->status) << ",";
-            json << R"("created_at":")" << o->created_at << R"(")";
+            json << R"("ts":)" << (o->created_at.empty() ? "0" : o->created_at);
             if (!o->failure_reason.empty()) {
                 json << R"(,"failure_reason":")" << o->failure_reason << R"(")";
             }
@@ -1484,7 +1484,7 @@ int main(int argc, char* argv[]) {
                 json << R"("code":)" << static_cast<int>(f.code) << ",";
                 json << R"("level":)" << static_cast<int>(f.level) << ",";
                 json << R"("description":")" << f.description << R"(",)";
-                json << R"("timestamp":")" << f.timestamp << R"(",)";
+                json << R"("ts":)" << (f.timestamp.empty() ? "0" : f.timestamp);
                 json << R"("sensor_snapshot":)" << (f.sensor_snapshot.empty() ? "null" : f.sensor_snapshot);
                 json << "}";
             }
@@ -1508,7 +1508,7 @@ int main(int argc, char* argv[]) {
                 json << R"("code":)" << static_cast<int>(f.code) << ",";
                 json << R"("level":)" << static_cast<int>(f.level) << ",";
                 json << R"("description":")" << f.description << R"(",)";
-                json << R"("timestamp":")" << f.timestamp << R"(")";
+                json << R"("ts":)" << (f.timestamp.empty() ? "0" : f.timestamp);
                 json << "}";
             }
             json << "]}}";
@@ -1537,7 +1537,7 @@ int main(int argc, char* argv[]) {
                      << R"("code":)" << static_cast<int>(f.code) << ","
                      << R"("level":)" << static_cast<int>(f.level) << ","
                      << R"("description":")" << f.description << R"(",)";
-                json << R"("timestamp":")" << f.timestamp << R"(")";
+                json << R"("ts":)" << (f.timestamp.empty() ? "0" : f.timestamp);
                 json << "}";
             }
             json << "]}}";
