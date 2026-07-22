@@ -162,10 +162,13 @@ int main(int argc, char* argv[]) {
     RecipeManager recipe_mgr;
 
     // Wire database to managers for persistence
-    order_mgr.set_database(&db);
-    order_mgr.load_from_database();
     recipe_mgr.set_database(&db);
     recipe_mgr.load_from_database();
+    if (recipe_mgr.all_recipes().empty()) recipe_mgr.seed_mock_data();
+
+    order_mgr.set_database(&db);
+    order_mgr.load_from_database();
+    if (order_mgr.list_all_orders().empty()) order_mgr.seed_mock_data();
     ota_mgr.set_database(&db);
     ota_mgr.load_from_database();
     // Scan disk for firmware files (survives restart)
@@ -370,7 +373,7 @@ int main(int argc, char* argv[]) {
                 json << R"("network_status":)" << static_cast<int>(d.network_status) << ",";
                 json << R"("work_status":)" << static_cast<int>(d.work_status) << ",";
                 json << R"("activated":)" << (d.activated ? "true" : "false") << ",";
-                json << R"("last_heartbeat_at":)" << d.last_heartbeat_at << ",";
+                json << R"("ts":)" << d.last_heartbeat_at << ",";
                 json << R"("activated_at":)" << d.activated_at;
                 json << "}";
             }
@@ -666,7 +669,7 @@ int main(int argc, char* argv[]) {
     // ================================================================
     // List all orders
     api.get("/api/v1/orders",
-        [&order_mgr](const HttpRequest&) -> HttpResponse {
+        [&order_mgr, &recipe_mgr](const HttpRequest&) -> HttpResponse {
             auto orders = order_mgr.list_all_orders();
             std::ostringstream json;
             json << R"({"code":0,"message":"success","data":{)";
@@ -674,17 +677,46 @@ int main(int argc, char* argv[]) {
             for (size_t i = 0; i < orders.size(); i++) {
                 if (i > 0) json << ",";
                 const auto& o = orders[i];
+                // Resolve recipe_name
+                std::string rname;
+                auto recipe = recipe_mgr.find_by_id(o.recipe_id);
+                if (recipe) rname = recipe->recipe_name;
+
+                // Convert created_at to epoch seconds
+                std::string ts;
+                if (!o.created_at.empty() && o.created_at != "0") {
+                    // Check if already a numeric timestamp (all digits)
+                    bool all_digits = true;
+                    for (char c : o.created_at) { if (!isdigit(c)) { all_digits = false; break; } }
+                    if (all_digits) {
+                        ts = o.created_at;
+                    } else if (o.created_at.size() >= 19) {
+                        // Parse ISO 8601 (YYYY-MM-DDTHH:MM:SSZ)
+                        std::tm tm = {};
+                        std::istringstream ss(o.created_at.substr(0, 19));
+                        ss >> std::get_time(&tm, "%Y-%m-%dT%H:%M:%S");
+                        if (!ss.fail()) {
+                            ts = std::to_string(timegm(&tm));
+                        }
+                    }
+                }
+                if (ts.empty()) {
+                    ts = std::to_string(std::chrono::duration_cast<std::chrono::seconds>(
+                        std::chrono::system_clock::now().time_since_epoch()).count());
+                }
+
                 json << "{"
                      << R"("order_id":")" << o.order_id << R"(",)";
                 json << R"("tenant_id":")" << o.tenant_id << R"(",)";
                 json << R"("device_id":")" << o.device_id << R"(",)";
                 json << R"("recipe_id":")" << o.recipe_id << R"(",)";
+                json << R"("recipe_name":")" << rname << R"(",)";
                 json << R"("cup_size":")" << o.cup_size << R"(",)";
                 json << R"("quantity":)" << o.quantity << ",";
                 json << R"("total_amount":)" << o.total_amount << ",";
                 json << R"("payment_method":")" << o.payment_method << R"(",)";
                 json << R"("status":)" << static_cast<int>(o.status) << ",";
-                json << R"("ts":)" << (o.created_at.empty() ? "0" : o.created_at);
+                json << R"("ts":)" << ts;
                 if (!o.failure_reason.empty()) {
                     json << R"(,"failure_reason":")" << o.failure_reason << R"(")";
                 }
@@ -1661,7 +1693,7 @@ int main(int argc, char* argv[]) {
                 json << R"("work_status":)" << static_cast<int>(d.work_status) << ",";
                 json << R"("firmware_version":")" << d.firmware_version << R"(",)";
                 json << R"("model":")" << d.model << R"(",)";
-                json << R"("last_heartbeat_at":)" << d.last_heartbeat_at;
+                json << R"("ts":)" << d.last_heartbeat_at;
                 json << "}";
             }
             json << "]}}";
