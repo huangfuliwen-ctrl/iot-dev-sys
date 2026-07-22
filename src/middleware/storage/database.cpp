@@ -288,12 +288,13 @@ StatusCode Database::create_orders_table() {
             tenant_id       TEXT NOT NULL DEFAULT 'default',
             device_id       TEXT NOT NULL,
             recipe_id       TEXT NOT NULL DEFAULT '',
+            recipe_name     TEXT NOT NULL DEFAULT '',
             cup_size        TEXT NOT NULL DEFAULT '',
             quantity        INTEGER NOT NULL DEFAULT 1,
             total_amount    INTEGER NOT NULL DEFAULT 0,
             payment_method  TEXT NOT NULL DEFAULT '',
             status          INTEGER NOT NULL DEFAULT 0,
-            created_at      TEXT NOT NULL DEFAULT '',
+            created_at      BIGINT NOT NULL DEFAULT 0,
             failure_reason  TEXT NOT NULL DEFAULT '',
             FOREIGN KEY (tenant_id) REFERENCES tenants(tenant_id)
         );
@@ -328,7 +329,7 @@ StatusCode Database::create_faults_table() {
             code            INTEGER NOT NULL,
             level           INTEGER NOT NULL DEFAULT 1,
             description     TEXT NOT NULL DEFAULT '',
-            timestamp       TEXT NOT NULL DEFAULT '',
+            created_at      BIGINT NOT NULL DEFAULT 0,
             resolved        BOOLEAN NOT NULL DEFAULT FALSE,
             sensor_snapshot TEXT NOT NULL DEFAULT ''
         );
@@ -607,7 +608,8 @@ Order Database::order_from_row(const std::vector<std::string>& row) const {
     o.tenant_id      = row[2];
     o.device_id      = row[3];
     o.recipe_id      = row[4];
-    o.cup_size       = row[5];
+    o.recipe_name    = row.size() > 5 ? row[5] : "";
+    o.cup_size       = row.size() > 6 ? row[6] : "";
     o.quantity       = std::stoi(row[6]);
     o.total_amount   = std::stoi(row[7]);
     o.payment_method = row[8];
@@ -979,17 +981,18 @@ std::vector<DeviceModelInfo> Database::list_device_models(const std::string& typ
 StatusCode Database::insert_order(const Order& order) {
     std::ostringstream sql;
     sql << "INSERT INTO orders "
-        << "(order_id,tenant_id,device_id,recipe_id,cup_size,quantity,total_amount,"
+        << "(order_id,tenant_id,device_id,recipe_id,recipe_name,cup_size,quantity,total_amount,"
         << "payment_method,status,created_at,failure_reason) VALUES ("
         << sql_str(order.order_id) << "," << sql_str(order.tenant_id) << ","
         << sql_str(order.device_id) << "," << sql_str(order.recipe_id) << ","
+        << sql_str(order.recipe_name) << ","
         << sql_str(order.cup_size) << "," << order.quantity << ","
         << order.total_amount << "," << sql_str(order.payment_method) << ","
-        << static_cast<int>(order.status) << "," << sql_str(order.created_at) << ","
+        << static_cast<int>(order.status) << "," << order.created_at << ","
         << sql_str(order.failure_reason)
         << ") ON CONFLICT (order_id) DO UPDATE SET "
         << "tenant_id=EXCLUDED.tenant_id,device_id=EXCLUDED.device_id,"
-        << "recipe_id=EXCLUDED.recipe_id,cup_size=EXCLUDED.cup_size,"
+        << "recipe_id=EXCLUDED.recipe_id,recipe_name=EXCLUDED.recipe_name,cup_size=EXCLUDED.cup_size,"
         << "quantity=EXCLUDED.quantity,total_amount=EXCLUDED.total_amount,"
         << "payment_method=EXCLUDED.payment_method,status=EXCLUDED.status,"
         << "created_at=EXCLUDED.created_at,failure_reason=EXCLUDED.failure_reason";
@@ -1061,10 +1064,10 @@ std::vector<Recipe> Database::list_all_recipes() {
 StatusCode Database::insert_fault(const FaultInfo& fault) {
     std::ostringstream sql;
     sql << "INSERT INTO faults "
-        << "(tenant_id,device_id,code,level,description,timestamp,sensor_snapshot) VALUES ("
+        << "(tenant_id,device_id,code,level,description,created_at,sensor_snapshot) VALUES ("
         << sql_str(fault.tenant_id) << "," << sql_str(fault.device_id) << ","
         << static_cast<int>(fault.code) << "," << static_cast<int>(fault.level) << ","
-        << sql_str(fault.description) << "," << sql_str(fault.timestamp) << ","
+        << sql_str(fault.description) << "," << fault.timestamp << ","
         << sql_str(fault.sensor_snapshot) << ")";
     return execute(sql.str());
 }

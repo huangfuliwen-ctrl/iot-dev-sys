@@ -392,6 +392,7 @@ struct Order {
     std::string tenant_id;
     std::string device_id;
     std::string recipe_id;
+    std::string recipe_name;
     std::string cup_size;
     int32_t     quantity = 1;
     int32_t     total_amount = 0;

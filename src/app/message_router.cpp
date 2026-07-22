@@ -102,8 +102,10 @@ void MessageRouter::handle_event(const ParsedTopic& pt, const std::string& paylo
             order.device_id  = pt.device_id;
             order.tenant_id  = resolve_tenant(device_mgr_, pt.device_id);
             order.recipe_id  = JsonHelper::get_string(payload, "recipe_id");
+            order.recipe_name = JsonHelper::get_string(payload, "recipe_name");
             order.cup_size   = JsonHelper::get_string(payload, "cup_size");
             order.status     = OrderStatus::COMPLETED;
+            order.created_at = std::to_string(JsonHelper::get_int(payload, "ts", 0));
             order_mgr_->create_order(order);
         }
     } else if (event_type == "fault_alert") {

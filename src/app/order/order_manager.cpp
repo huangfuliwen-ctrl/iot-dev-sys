@@ -26,6 +26,7 @@ StatusCode OrderManager::create_order(const Order& order) {
         return StatusCode::ORDER_QUEUE_FULL;
     }
     impl_->order_queue.push_back(order);
+    if (db_) db_->insert_order(order);
 
     // Report order created to cloud
     sync_status_to_cloud(order.order_id);
