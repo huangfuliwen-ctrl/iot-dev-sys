@@ -616,10 +616,10 @@ Order Database::order_from_row(const std::vector<std::string>& row) const {
     o.quantity       = row.size() > 6 ? safe_stoi(row[6]) : 0;
     o.total_amount   = row.size() > 7 ? safe_stoi(row[7]) : 0;
     o.payment_method = row.size() > 8 ? row[8] : "";
-    o.status         = static_cast<OrderStatus>(row.size() > 9 ? safe_stoi(row[9]) : 0);
-    o.failure_reason = row.size() > 11 ? row[11] : "";
-    o.created_at     = row.size() > 12 ? row[12] : "0";
-    o.recipe_name    = row.size() > 13 ? row[13] : "";
+    o.status         = static_cast<OrderStatus>(row.size() > 9 ? safe_stoi(row[9]) : 3);
+    o.failure_reason = row.size() > 10 ? row[10] : "";
+    o.created_at     = row.size() > 11 ? row[11] : "0";
+    o.recipe_name    = row.size() > 12 ? row[12] : "";
     return o;
 }
 
