@@ -682,28 +682,11 @@ int main(int argc, char* argv[]) {
                 auto recipe = recipe_mgr.find_by_id(o.recipe_id);
                 if (recipe) rname = recipe->recipe_name;
 
-                // Convert created_at to epoch seconds
-                std::string ts;
-                if (!o.created_at.empty() && o.created_at != "0") {
-                    // Check if already a numeric timestamp (all digits)
-                    bool all_digits = true;
-                    for (char c : o.created_at) { if (!isdigit(c)) { all_digits = false; break; } }
-                    if (all_digits) {
-                        ts = o.created_at;
-                    } else if (o.created_at.size() >= 19) {
-                        // Parse ISO 8601 (YYYY-MM-DDTHH:MM:SSZ)
-                        std::tm tm = {};
-                        std::istringstream ss(o.created_at.substr(0, 19));
-                        ss >> std::get_time(&tm, "%Y-%m-%dT%H:%M:%S");
-                        if (!ss.fail()) {
-                            ts = std::to_string(timegm(&tm));
-                        }
-                    }
-                }
-                if (ts.empty()) {
-                    ts = std::to_string(std::chrono::duration_cast<std::chrono::seconds>(
-                        std::chrono::system_clock::now().time_since_epoch()).count());
-                }
+                // created_at is Unix timestamp (BIGINT), use directly
+                std::string ts = (o.created_at.empty() || o.created_at == "0")
+                    ? std::to_string(std::chrono::duration_cast<std::chrono::seconds>(
+                        std::chrono::system_clock::now().time_since_epoch()).count())
+                    : o.created_at;
 
                 json << "{"
                      << R"("order_id":")" << o.order_id << R"(",)";
@@ -716,7 +699,7 @@ int main(int argc, char* argv[]) {
                 json << R"("total_amount":)" << o.total_amount << ",";
                 json << R"("payment_method":")" << o.payment_method << R"(",)";
                 json << R"("status":)" << static_cast<int>(o.status) << ",";
-                json << R"("ts":)" << ts;
+                json << R"("created_at":)" << ts;
                 if (!o.failure_reason.empty()) {
                     json << R"(,"failure_reason":")" << o.failure_reason << R"(")";
                 }
@@ -743,7 +726,7 @@ int main(int argc, char* argv[]) {
             json << R"("total_amount":)" << o->total_amount << ",";
             json << R"("payment_method":")" << o->payment_method << R"(",)";
             json << R"("status":)" << static_cast<int>(o->status) << ",";
-            json << R"("ts":)" << (o->created_at.empty() ? "0" : o->created_at);
+            json << R"("created_at":)" << (o->created_at.empty() ? "0" : o->created_at);
             if (!o->failure_reason.empty()) {
                 json << R"(,"failure_reason":")" << o->failure_reason << R"(")";
             }
@@ -1516,7 +1499,7 @@ int main(int argc, char* argv[]) {
                 json << R"("code":)" << static_cast<int>(f.code) << ",";
                 json << R"("level":)" << static_cast<int>(f.level) << ",";
                 json << R"("description":")" << f.description << R"(",)";
-                json << R"("ts":)" << (f.timestamp.empty() ? "0" : f.timestamp);
+                json << R"("created_at":)" << (f.timestamp.empty() ? "0" : f.timestamp) << ",";
                 json << R"("sensor_snapshot":)" << (f.sensor_snapshot.empty() ? "null" : f.sensor_snapshot);
                 json << "}";
             }
@@ -1540,7 +1523,7 @@ int main(int argc, char* argv[]) {
                 json << R"("code":)" << static_cast<int>(f.code) << ",";
                 json << R"("level":)" << static_cast<int>(f.level) << ",";
                 json << R"("description":")" << f.description << R"(",)";
-                json << R"("ts":)" << (f.timestamp.empty() ? "0" : f.timestamp);
+                json << R"("ts":)" << ((f.timestamp.empty() || f.timestamp == "f") ? "0" : f.timestamp);
                 json << "}";
             }
             json << "]}}";
@@ -1569,7 +1552,7 @@ int main(int argc, char* argv[]) {
                      << R"("code":)" << static_cast<int>(f.code) << ","
                      << R"("level":)" << static_cast<int>(f.level) << ","
                      << R"("description":")" << f.description << R"(",)";
-                json << R"("ts":)" << (f.timestamp.empty() ? "0" : f.timestamp);
+                json << R"("ts":)" << ((f.timestamp.empty() || f.timestamp == "f") ? "0" : f.timestamp);
                 json << "}";
             }
             json << "]}}";

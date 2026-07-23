@@ -603,19 +603,23 @@ DeviceModelInfo Database::model_from_row(const std::vector<std::string>& row) co
 
 Order Database::order_from_row(const std::vector<std::string>& row) const {
     Order o;
-    if (row.size() < 11) return o;
+    // DB column order: id(0),order_id(1),tenant_id(2),device_id(3),
+    //   recipe_id(4),cup_size(5),quantity(6),total_amount(7),
+    //   payment_method(8),status(9),failure_reason(11),created_at(12),recipe_name(13)
+    if (row.size() < 6) return o;
     o.order_id       = row[1];
     o.tenant_id      = row[2];
     o.device_id      = row[3];
     o.recipe_id      = row[4];
-    o.recipe_name    = row.size() > 5 ? row[5] : "";
-    o.cup_size       = row.size() > 6 ? row[6] : "";
-    o.quantity       = std::stoi(row[6]);
-    o.total_amount   = std::stoi(row[7]);
-    o.payment_method = row[8];
-    o.status         = static_cast<OrderStatus>(std::stoi(row[9]));
-    o.created_at     = row[10];
+    o.cup_size       = row[5];
+    auto safe_stoi = [](const std::string& s) -> int { try { return s.empty() ? 0 : std::stoi(s); } catch(...) { return 0; } };
+    o.quantity       = row.size() > 6 ? safe_stoi(row[6]) : 0;
+    o.total_amount   = row.size() > 7 ? safe_stoi(row[7]) : 0;
+    o.payment_method = row.size() > 8 ? row[8] : "";
+    o.status         = static_cast<OrderStatus>(row.size() > 9 ? safe_stoi(row[9]) : 0);
     o.failure_reason = row.size() > 11 ? row[11] : "";
+    o.created_at     = row.size() > 12 ? row[12] : "0";
+    o.recipe_name    = row.size() > 13 ? row[13] : "";
     return o;
 }
 
@@ -641,8 +645,9 @@ FaultInfo Database::fault_from_row(const std::vector<std::string>& row) const {
     // Legacy mapping: old L3/L4→ERROR, L0-L2→WARNING
     { int ol = std::stoi(row[4]); f.level = (ol >= 3) ? FaultLevel::ERROR : FaultLevel::WARNING; }
     f.description    = row[5];
-    f.timestamp      = row[6];
-    f.sensor_snapshot = row.size() > 8 ? row[8] : "";
+    // row[6] is resolved (BOOLEAN), skip
+    f.sensor_snapshot = row.size() > 7 ? row[7] : "";
+    f.timestamp      = row.size() > 8 ? row[8] : "0";
     return f;
 }
 
