@@ -1499,7 +1499,7 @@ int main(int argc, char* argv[]) {
                 json << R"("code":)" << static_cast<int>(f.code) << ",";
                 json << R"("level":)" << static_cast<int>(f.level) << ",";
                 json << R"("description":")" << f.description << R"(",)";
-                json << R"("created_at":)" << (f.timestamp.empty() ? "0" : f.timestamp) << ",";
+                json << R"("ts":)" << ((f.timestamp.empty() || f.timestamp.find_first_not_of("0123456789") != std::string::npos) ? "0" : f.timestamp) << ",";
                 json << R"("sensor_snapshot":)" << (f.sensor_snapshot.empty() ? "null" : f.sensor_snapshot);
                 json << "}";
             }
