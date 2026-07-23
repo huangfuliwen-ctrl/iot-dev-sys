@@ -144,14 +144,13 @@ std::string DeviceActivation::generate_device_id(const ActivationRequest& reques
     std::string input = request.uid + ":" + request.model_key;
     SHA256(reinterpret_cast<const unsigned char*>(input.data()), input.size(), hash);
     std::ostringstream oss;
-    oss << "dev_";
     for (int i = 0; i < 8; i++)
         oss << std::hex << std::setfill('0') << std::setw(2) << (int)hash[i];
     return oss.str();
 #else
     std::hash<std::string> h;
     std::ostringstream oss;
-    oss << "dev_" << std::hex << h(request.uid + request.model_key);
+    oss << std::hex << h(request.uid + request.model_key);
     return oss.str();
 #endif
 }
