@@ -1523,7 +1523,7 @@ int main(int argc, char* argv[]) {
                 json << R"("code":)" << static_cast<int>(f.code) << ",";
                 json << R"("level":)" << static_cast<int>(f.level) << ",";
                 json << R"("description":")" << f.description << R"(",)";
-                json << R"("ts":)" << ((f.timestamp.empty() || f.timestamp == "f") ? "0" : f.timestamp);
+                json << R"("ts":)" << ((f.timestamp.empty() || f.timestamp == "f" || f.timestamp.find_first_not_of("0123456789") != std::string::npos) ? "0" : f.timestamp);
                 json << "}";
             }
             json << "]}}";
@@ -1552,7 +1552,7 @@ int main(int argc, char* argv[]) {
                      << R"("code":)" << static_cast<int>(f.code) << ","
                      << R"("level":)" << static_cast<int>(f.level) << ","
                      << R"("description":")" << f.description << R"(",)";
-                json << R"("ts":)" << ((f.timestamp.empty() || f.timestamp == "f") ? "0" : f.timestamp);
+                json << R"("ts":)" << ((f.timestamp.empty() || f.timestamp == "f" || f.timestamp.find_first_not_of("0123456789") != std::string::npos) ? "0" : f.timestamp);
                 json << "}";
             }
             json << "]}}";

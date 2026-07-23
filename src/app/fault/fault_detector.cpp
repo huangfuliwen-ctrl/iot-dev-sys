@@ -88,7 +88,7 @@ void FaultManager::seed_mock_data() {
     f1.code = FaultCode::E003_PUMP_FAILURE;
     f1.level = FaultLevel::ERROR;
     f1.description = "水泵流量异常：期望流量 8ml/s，实际 3ml/s";
-    f1.timestamp = "2026-06-26T08:15:00Z";
+    f1.timestamp = "1782660900";
     f1.sensor_snapshot = R"({"flow_rate_ml_s":3.0,"target_flow":8.0,"pump_current_a":0.3})";
     active_faults_.push_back(f1);
 
@@ -98,7 +98,7 @@ void FaultManager::seed_mock_data() {
     f2.code = FaultCode::W003_MATERIAL_LOW;
     f2.level = FaultLevel::WARNING;
     f2.description = "咖啡豆余量不足：当前 120g，阈值 150g";
-    f2.timestamp = "2026-06-26T09:00:00Z";
+    f2.timestamp = "1782663600";
     f2.sensor_snapshot = R"({"bean_remaining_g":120,"threshold_g":150})";
     active_faults_.push_back(f2);
 
@@ -108,7 +108,7 @@ void FaultManager::seed_mock_data() {
     f3.code = FaultCode::W002_COMM_FAIL;
     f3.level = FaultLevel::WARNING;
     f3.description = "通信模块连续3次心跳超时，设备可能离线";
-    f3.timestamp = "2026-06-26T09:30:00Z";
+    f3.timestamp = "1782665400";
     f3.sensor_snapshot = R"({"missed_heartbeats":3,"last_seen":"2026-06-26T09:27:00Z"})";
     active_faults_.push_back(f3);
 
@@ -118,7 +118,7 @@ void FaultManager::seed_mock_data() {
     f4.code = FaultCode::E005_WATER_LEAK;
     f4.level = FaultLevel::ERROR;
     f4.description = "机箱底部漏水传感器触发，已自动锁定";
-    f4.timestamp = "2026-06-26T08:45:00Z";
+    f4.timestamp = "1782662700";
     f4.sensor_snapshot = R"({"leak_sensor":true,"zone":"bottom_tray","auto_lockdown":true})";
     active_faults_.push_back(f4);
 
