@@ -51,12 +51,25 @@ ActivationResponse DeviceActivation::process_activation(const ActivationRequest&
         return resp;
     }
 
-    // Step 3: Check if device already exists
+    // Step 3: If device already exists, return existing info (re-activation)
     if (db_.device_exists(request.uid)) {
-        resp.success = false;
-        resp.error_code = static_cast<int32_t>(StatusCode::DEV_ALREADY_ACTIVE);
-        resp.error_message = "Device already registered";
-        return resp;
+        auto existing = db_.get_device_by_hwuid(request.uid);
+        if (existing) {
+            auto model = db_.get_device_model_by_key(request.model_key);
+            auto dtype = db_.get_device_type(model ? model->type_code : "other");
+            resp.success = true;
+            resp.device_id = existing->device_id;
+            resp.model_key = request.model_key;
+            resp.model_code = model ? model->model_code : existing->model;
+            resp.tenant_id = existing->tenant_id;
+            resp.product_id = existing->product_id;
+            resp.device_type = dtype ? dtype->type_code : "other";
+            resp.firmware_version = existing->firmware_version;
+            resp.activation_token = generate_activation_token(existing->device_id);
+            resp.mqtt_broker_uri = broker_uri_;
+            resp.ttl_seconds = static_cast<int32_t>(365 * 24 * 3600);
+            return resp;
+        }
     }
 
     // Step 4: Tenant assigned by server (from DB config), NOT from device request
