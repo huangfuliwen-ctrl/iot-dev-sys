@@ -1,0 +1,19 @@
+[Unit]
+Description=dev-sys-cloud IoT Platform Service
+After=network.target postgresql.service
+
+[Service]
+Type=simple
+User=devsys
+Group=devsys
+WorkingDirectory=/app
+Environment=DEV_SYS_DB=postgresql://devsys:devsys@127.0.0.1:5432/devsys_cloud
+ExecStart=/usr/local/bin/dev-sys-cloud
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=dev-sys-cloud
+
+[Install]
+WantedBy=multi-user.target

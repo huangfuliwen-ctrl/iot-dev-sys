@@ -1,0 +1,22 @@
+# dev-sys-cloud 运行时 Docker 镜像 — 使用预编译二进制
+# 本地编译: make -f deploy/Makefile package
+# 服务器上: docker build -f Dockerfile.runtime -t dev-sys-cloud .
+
+FROM ubuntu:22.04
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libssl3 libpq5 ca-certificates curl libsqlite3-0 \
+    && rm -rf /var/lib/apt/lists/* \
+    && useradd -r -s /bin/false devsys \
+    && mkdir -p /app/config /app/firmware_files /app/logs \
+    && chown -R devsys:devsys /app
+
+COPY dev-sys-cloud /usr/local/bin/
+COPY dev-sys.json /app/config/mqtt_config.json
+
+WORKDIR /app
+EXPOSE 9080
+
+USER devsys
+HEALTHCHECK --interval=30s --timeout=5s CMD curl -sf http://localhost:9080/api/v1/health || exit 1
+CMD ["/usr/local/bin/dev-sys-cloud"]
