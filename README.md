@@ -111,3 +111,120 @@ publish: {tenant}/iot/{product}/{device}/command/reboot ──→ 设备订阅: 
 ```
 
 Broker ACL确保：设备只能访问自己租户的topic，云服务拥有全局读取权限。
+
+## 环境变量
+
+| 变量 | 默认值 | 说明 |
+|------|--------|------|
+| `DEV_SYS_DB` | `postgresql://devsys:devsys@127.0.0.1:5432/devsys_cloud` | PostgreSQL连接串 |
+
+## 本地运行
+
+```bash
+# 1. 确保 PostgreSQL 已运行，数据库和用户已创建
+PGPASSWORD=devsys psql -h 127.0.0.1 -U devsys -d devsys_cloud -c "SELECT 1"
+
+# 2. 编译
+mkdir build && cd build
+cmake .. -DCMAKE_BUILD_TYPE=Debug -DBUILD_TESTS=OFF
+make -j$(nproc)
+
+# 3. 启动
+cd ..
+export DEV_SYS_DB="postgresql://devsys:devsys@127.0.0.1:5432/devsys_cloud"
+./build/bin/dev-sys-cloud
+
+# 4. 验证
+curl http://127.0.0.1:9080/api/v1/health
+```
+
+## 部署到阿里云
+
+### 方式一：一键部署脚本
+
+```bash
+# 直接部署到阿里云 ECS (需要 SSH 免密)
+bash deploy/deploy-aliyun.sh ubuntu@39.106.70.145
+```
+
+脚本会自动完成：Release编译 → 打包 → scp上传 → 远程安装 → systemd启动。
+
+### 方式二：打包部署
+
+```bash
+# 1. 本机编译打包
+make -f deploy/Makefile package
+# 生成: deploy/dev-sys-cloud-1.0.0-x86_64.tar.gz
+
+# 2. 上传到服务器
+scp deploy/dev-sys-cloud-*.tar.gz ubuntu@39.106.70.145:/tmp/
+
+# 3. 服务器上安装
+ssh ubuntu@39.106.70.145
+cd /tmp && tar xzf dev-sys-cloud-*.tar.gz
+sudo bash install.sh
+```
+
+### 方式三：Docker 部署
+
+```bash
+# 打包 Docker 部署文件（含预编译二进制）
+make -f deploy/Makefile docker-package
+
+# 上传到服务器
+scp dev-sys-cloud-docker-*.tar.gz ubuntu@39.106.70.145:/tmp/
+
+# 服务器上构建并运行
+ssh ubuntu@39.106.70.145
+cd /tmp && tar xzf dev-sys-cloud-docker-*.tar.gz
+docker build -t dev-sys-cloud .
+docker run -d --name dev-sys-cloud --restart=always \
+    -p 9080:9080 \
+    -e DEV_SYS_DB='postgresql://devsys:devsys@host.docker.internal:5432/devsys_cloud' \
+    -v /data/dev-sys/firmware:/app/firmware_files \
+    dev-sys-cloud
+```
+
+### 方式四：阿里云 ACR (容器镜像服务)
+
+```bash
+# 1. 登录 ACR
+docker login --username=your_aliyun_account registry.cn-hangzhou.aliyuncs.com
+
+# 2. 构建并推送
+export REGISTRY="registry.cn-hangzhou.aliyuncs.com/iot-platform"
+bash deploy/deploy-acr.sh push
+
+# 3. 远程部署
+bash deploy/deploy-acr.sh deploy ubuntu@39.106.70.145
+```
+
+### 服务器环境要求
+
+- Ubuntu 22.04+
+- PostgreSQL 14+ (监听 5432，允许密码连接)
+- 环境变量 `DEV_SYS_DB` 指向 PostgreSQL
+
+```bash
+# 快速安装 PostgreSQL
+sudo apt-get install -y postgresql
+sudo -u postgres psql -c "CREATE USER devsys WITH PASSWORD 'devsys';"
+sudo -u postgres psql -c "CREATE DATABASE devsys_cloud OWNER devsys;"
+```
+
+### 部署目录结构
+
+```
+deploy/
+├── Makefile                 # 统一部署命令 (package/deploy/docker/docker-package)
+├── deploy-aliyun.sh         # 一键阿里云部署
+├── deploy-acr.sh            # ACR镜像推送+部署
+├── install.sh               # 服务器安装脚本
+├── Dockerfile               # 多阶段构建 (编译+运行)
+├── Dockerfile.runtime       # 运行时镜像 (预编译二进制)
+├── start.sh / stop.sh / status.sh   # 本地进程管理
+├── config/                  # 配置文件
+├── production/              # 生产环境配置 (systemd/Docker)
+├── log/                     # 运行日志
+└── run/                     # PID文件
+```
