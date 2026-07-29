@@ -5,7 +5,8 @@
 FROM ubuntu:22.04 AS builder
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential cmake g++ libssl-dev libcurl4-openssl-dev libsqlite3-dev libpq-dev \
+    build-essential cmake g++ pkg-config \
+    libssl-dev libcurl4-openssl-dev libsqlite3-dev libpq-dev \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /build
@@ -14,7 +15,7 @@ COPY . .
 # 编译
 RUN cmake -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTS=OFF -DUSE_SYSTEM_PAHO=OFF \
     -DUSE_SYSTEM_LIBPQ=ON \
-    && cmake --build build -j$$(nproc) \
+    && cmake --build build -j$(nproc) \
     && strip build/bin/dev-sys-cloud
 
 # === 阶段2: 运行 ===

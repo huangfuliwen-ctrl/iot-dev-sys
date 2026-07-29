@@ -157,10 +157,10 @@ make -f deploy/Makefile package
 # 生成: deploy/dev-sys-cloud-1.0.0-x86_64.tar.gz
 
 # 2. 上传到服务器
-scp deploy/dev-sys-cloud-*.tar.gz ubuntu@39.106.70.145:/tmp/
+scp deploy/dev-sys-cloud-*.tar.gz root@39.106.70.145:/tmp/
 
 # 3. 服务器上安装
-ssh ubuntu@39.106.70.145
+ssh root@39.106.70.145
 cd /tmp && tar xzf dev-sys-cloud-*.tar.gz
 sudo bash install.sh
 ```
@@ -172,10 +172,10 @@ sudo bash install.sh
 make -f deploy/Makefile docker-package
 
 # 上传到服务器
-scp dev-sys-cloud-docker-*.tar.gz ubuntu@39.106.70.145:/tmp/
+scp dev-sys-cloud-docker-*.tar.gz root@39.106.70.145:/tmp/
 
 # 服务器上构建并运行
-ssh ubuntu@39.106.70.145
+ssh root@39.106.70.145
 cd /tmp && tar xzf dev-sys-cloud-docker-*.tar.gz
 docker build -t dev-sys-cloud .
 docker run -d --name dev-sys-cloud --restart=always \
