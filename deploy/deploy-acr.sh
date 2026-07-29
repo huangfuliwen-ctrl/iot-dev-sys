@@ -26,18 +26,42 @@ push_image() {
 
 deploy_remote() {
     local SSH_HOST="${1:?Usage: bash deploy/deploy-acr.sh deploy root@39.106.70.145}"
+    local DB_CONN="${DEV_SYS_DB:-postgresql://devsys:devsys@172.17.0.1:5432/devsys_cloud}"
     echo "=== 远程部署 ==="
-    ssh "${SSH_HOST}" "docker pull ${IMAGE} && \
-        docker stop dev-sys-cloud 2>/dev/null || true && \
-        docker rm dev-sys-cloud 2>/dev/null || true && \
+    echo "目标: ${SSH_HOST}"
+    echo "镜像: ${IMAGE}"
+    echo "DB:   ${DB_CONN}"
+
+    # 1. 确保远程服务器已登录 ACR（首次需手动: docker login）
+    ssh "${SSH_HOST}" "docker pull ${IMAGE}" || {
+        echo "ERROR: docker pull 失败。请先在远程服务器手动登录 ACR:"
+        echo "  ssh ${SSH_HOST}"
+        echo "  docker login --username=你的阿里云账号 \$(echo ${REGISTRY} | cut -d/ -f1)"
+        exit 1
+    }
+
+    # 2. 停旧启新
+    ssh "${SSH_HOST}" "
+        docker stop dev-sys-cloud 2>/dev/null || true
+        docker rm dev-sys-cloud 2>/dev/null || true
         docker run -d --name dev-sys-cloud \
-            --restart=always \
+            --restart=unless-stopped \
             -p 9080:9080 \
-            -e DEV_SYS_DB='postgresql://devsys:devsys@host.docker.internal:5432/devsys_cloud' \
+            -e DEV_SYS_DB='${DB_CONN}' \
             -v /data/dev-sys/firmware:/app/firmware_files \
             -v /data/dev-sys/logs:/app/logs \
-            ${IMAGE}"
-    echo "部署完成! http://${SSH_HOST#*@}:9080/api/v1/health"
+            ${IMAGE}
+    "
+
+    # 3. 等待启动并验证
+    echo "等待容器启动..."
+    sleep 5
+    echo ""
+    ssh "${SSH_HOST}" "docker ps --filter name=dev-sys-cloud --format '{{.Status}}' && echo '---' && curl -s http://localhost:9080/api/v1/health || docker logs --tail 20 dev-sys-cloud"
+
+    local IP=$(echo "${SSH_HOST}" | cut -d@ -f2)
+    echo ""
+    echo "部署完成! http://${IP}:9080/api/v1/health"
 }
 
 case "${1:-push}" in

@@ -196,7 +196,7 @@ export REGISTRY="registry.cn-hangzhou.aliyuncs.com/iot-platform"
 bash deploy/deploy-acr.sh push
 
 # 3. 远程部署
-bash deploy/deploy-acr.sh deploy ubuntu@39.106.70.145
+bash deploy/deploy-acr.sh deploy root@39.106.70.145
 ```
 
 ### 服务器环境要求

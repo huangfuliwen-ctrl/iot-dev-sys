@@ -22,7 +22,7 @@ RUN rm -rf build && cmake -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTS=OFF 
 FROM ubuntu:22.04
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    libssl3 ca-certificates curl libsqlite3-0 \
+    libssl3 libpq5 ca-certificates curl libsqlite3-0 \
     && rm -rf /var/lib/apt/lists/* \
     && useradd -r -s /bin/false devsys \
     && mkdir -p /app/config /app/firmware_files /app/logs /data/dev-sys \
