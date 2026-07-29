@@ -12,7 +12,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && chown -R devsys:devsys /app
 
 COPY dev-sys-cloud /usr/local/bin/
-COPY dev-sys.json /app/config/mqtt_config.json
+COPY mqtt_config.json /app/config/mqtt_config.json
 
 WORKDIR /app
 EXPOSE 9080

@@ -40,7 +40,7 @@ docker-package: build
 	rm -rf $(DIST)-docker && mkdir -p $(DIST)-docker
 	cp $(BINARY) $(DIST)-docker/
 	cp deploy/Dockerfile.runtime $(DIST)-docker/Dockerfile
-	cp deploy/production/dev-sys.json $(DIST)-docker/
+	cp config/mqtt_config.json $(DIST)-docker/
 	cd $(DIST)-docker && tar czf ../../dev-sys-cloud-docker-$(VERSION).tar.gz .
 	@echo "Docker package: dev-sys-cloud-docker-$(VERSION).tar.gz"
 	@echo "部署步骤:"

@@ -29,8 +29,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && chown -R devsys:devsys /app /data/dev-sys
 
 COPY --from=builder /build/build/bin/dev-sys-cloud /usr/local/bin/
-COPY config/mqtt_config.json /app/config/
-COPY deploy/production/dev-sys.json /app/config/mqtt_config.json
+COPY config/mqtt_config.json /app/config/mqtt_config.json
 
 WORKDIR /app
 EXPOSE 9080
