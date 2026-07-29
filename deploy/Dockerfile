@@ -13,7 +13,7 @@ WORKDIR /build
 COPY . .
 
 # 编译
-RUN cmake -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTS=OFF -DUSE_SYSTEM_PAHO=OFF \
+RUN rm -rf build && cmake -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTS=OFF -DUSE_SYSTEM_PAHO=OFF \
     -DUSE_SYSTEM_LIBPQ=ON 2>&1 \
     && cmake --build build -j2 2>&1 \
     && strip build/bin/dev-sys-cloud
