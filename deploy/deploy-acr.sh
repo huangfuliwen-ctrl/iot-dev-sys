@@ -9,6 +9,10 @@
 set -e
 
 VERSION=$(git describe --tags --always 2>/dev/null || echo "1.0.0")
+# 读取 .env 配置（如果存在）
+if [ -f .env ]; then
+    export $(grep -v '^#' .env | grep -v '^$' | xargs)
+fi
 REGISTRY="${REGISTRY:-registry.cn-hangzhou.aliyuncs.com/iot-platform}"
 IMAGE="${REGISTRY}/dev-sys-cloud:${VERSION}"
 
