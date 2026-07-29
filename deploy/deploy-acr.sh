@@ -46,7 +46,7 @@ deploy_remote() {
         docker rm dev-sys-cloud 2>/dev/null || true
         docker run -d --name dev-sys-cloud \
             --restart=unless-stopped \
-            -p 9080:9080 \
+            --network=host \
             -e DEV_SYS_DB='${DB_CONN}' \
             -v /data/dev-sys/firmware:/app/firmware_files \
             -v /data/dev-sys/logs:/app/logs \
