@@ -142,14 +142,38 @@ curl http://127.0.0.1:9080/api/v1/health
 
 ### 方式一：阿里云 ACR (推荐)
 
-```bash
-# 1. 确保 .env 中 REGISTRY 已配置
+**首次准备**：在 `.env` 中配置 REGISTRY 地址，本地和服务器各执行一次 `docker login`。
 
-# 2. 构建推送并部署
+**一键部署**（构建+推送+远程拉取+启动）：
+
+```bash
 sudo bash deploy/deploy-acr.sh deploy root@39.106.70.145
 ```
 
-脚本自动完成：Docker 构建 → 推送 ACR → SSH 远程拉取 → 容器启动。
+**分步操作**：
+
+```bash
+# 1. 本地构建镜像并推送到 ACR
+sudo bash deploy/deploy-acr.sh push
+
+# 2. 服务器上拉取镜像
+ssh root@39.106.70.145
+docker pull <REGISTRY>/dev-sys-cloud:latest
+
+# 3. 停旧启新
+docker stop dev-sys-cloud 2>/dev/null || true
+docker rm dev-sys-cloud 2>/dev/null || true
+docker run -d --name dev-sys-cloud \
+    --restart=unless-stopped \
+    --network=host \
+    -e DEV_SYS_DB='postgresql://devsys:devsys@127.0.0.1:5432/devsys_cloud' \
+    -v /data/dev-sys/firmware:/app/firmware_files \
+    <REGISTRY>/dev-sys-cloud:latest
+
+# 4. 验证
+curl http://localhost:9080/api/v1/health
+docker logs -f dev-sys-cloud
+```
 
 ### 方式二：Docker 离线包
 
