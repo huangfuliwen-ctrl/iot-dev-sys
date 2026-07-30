@@ -140,63 +140,26 @@ curl http://127.0.0.1:9080/api/v1/health
 
 ## 部署到阿里云
 
-### 方式一：一键部署脚本
+### 方式一：阿里云 ACR (推荐)
 
 ```bash
-# 直接部署到阿里云 ECS (需要 SSH 免密)
-bash deploy/deploy-aliyun.sh ubuntu@39.106.70.145
+# 1. 确保 .env 中 REGISTRY 已配置
+
+# 2. 构建推送并部署
+sudo bash deploy/deploy-acr.sh deploy root@39.106.70.145
 ```
 
-脚本会自动完成：Release编译 → 打包 → scp上传 → 远程安装 → systemd启动。
+脚本自动完成：Docker 构建 → 推送 ACR → SSH 远程拉取 → 容器启动。
 
-### 方式二：打包部署
-
-```bash
-# 1. 本机编译打包
-make -f deploy/Makefile package
-# 生成: deploy/dev-sys-cloud-1.0.0-x86_64.tar.gz
-
-# 2. 上传到服务器
-scp deploy/dev-sys-cloud-*.tar.gz root@39.106.70.145:/tmp/
-
-# 3. 服务器上安装
-ssh root@39.106.70.145
-cd /tmp && tar xzf dev-sys-cloud-*.tar.gz
-sudo bash install.sh
-```
-
-### 方式三：Docker 部署
+### 方式二：Docker 离线包
 
 ```bash
-# 打包 Docker 部署文件（含预编译二进制）
+# 1. 打包
 make -f deploy/Makefile docker-package
 
-# 上传到服务器
+# 2. 上传 + 部署
 scp dev-sys-cloud-docker-*.tar.gz root@39.106.70.145:/tmp/
-
-# 服务器上构建并运行
-ssh root@39.106.70.145
-cd /tmp && tar xzf dev-sys-cloud-docker-*.tar.gz
-docker build -t dev-sys-cloud .
-docker run -d --name dev-sys-cloud --restart=always \
-    -p 9080:9080 \
-    -e DEV_SYS_DB='postgresql://devsys:devsys@host.docker.internal:5432/devsys_cloud' \
-    -v /data/dev-sys/firmware:/app/firmware_files \
-    dev-sys-cloud
-```
-
-### 方式四：阿里云 ACR (容器镜像服务)
-
-```bash
-# 1. 登录 ACR
-docker login --username=your_aliyun_account registry.cn-hangzhou.aliyuncs.com
-
-# 2. 构建并推送
-export REGISTRY="registry.cn-hangzhou.aliyuncs.com/iot-platform"
-bash deploy/deploy-acr.sh push
-
-# 3. 远程部署
-bash deploy/deploy-acr.sh deploy root@39.106.70.145
+ssh root@39.106.70.145 "cd /tmp && tar xzf dev-sys-cloud-docker-*.tar.gz && docker build -t dev-sys-cloud . && docker run -d --name dev-sys-cloud --restart=unless-stopped --network=host -e DEV_SYS_DB='postgresql://devsys:devsys@127.0.0.1:5432/devsys_cloud' dev-sys-cloud"
 ```
 
 ### 服务器环境要求
