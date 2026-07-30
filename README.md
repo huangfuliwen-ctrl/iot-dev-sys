@@ -161,8 +161,7 @@ ssh root@39.106.70.145
 docker pull crpi-3enaq3tmd2p19mdc.cn-hangzhou.personal.cr.aliyuncs.com/iot-platform-coffee/dev-sys-cloud:latest
 
 # 3. 停旧启新
-docker stop dev-sys-cloud 2>/dev/null || true
-docker rm dev-sys-cloud 2>/dev/null || true
+docker stop dev-sys-cloud && docker rm dev-sys-cloud
 docker run -d --name dev-sys-cloud \
     --restart=unless-stopped \
     --network=host \

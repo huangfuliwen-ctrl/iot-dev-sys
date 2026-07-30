@@ -18,10 +18,12 @@ IMAGE="${REGISTRY}/dev-sys-cloud:${VERSION}"
 
 push_image() {
     echo "=== 构建 Docker 镜像 ==="
-    docker build -f deploy/Dockerfile -t "${IMAGE}" .
+    docker build -f deploy/Dockerfile -t "${IMAGE}" -t "${REGISTRY}/dev-sys-cloud:latest" .
     echo "=== 推送到 ACR ==="
     docker push "${IMAGE}"
+    docker push "${REGISTRY}/dev-sys-cloud:latest"
     echo "镜像: ${IMAGE}"
+    echo "镜像: ${REGISTRY}/dev-sys-cloud:latest"
 }
 
 deploy_remote() {
