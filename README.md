@@ -158,7 +158,7 @@ sudo bash deploy/deploy-acr.sh push
 
 # 2. 服务器上拉取镜像
 ssh root@39.106.70.145
-docker pull <REGISTRY>/dev-sys-cloud:latest
+docker pull crpi-3enaq3tmd2p19mdc.cn-hangzhou.personal.cr.aliyuncs.com/iot-platform-coffee/dev-sys-cloud:latest
 
 # 3. 停旧启新
 docker stop dev-sys-cloud 2>/dev/null || true
@@ -168,7 +168,7 @@ docker run -d --name dev-sys-cloud \
     --network=host \
     -e DEV_SYS_DB='postgresql://devsys:devsys@127.0.0.1:5432/devsys_cloud' \
     -v /data/dev-sys/firmware:/app/firmware_files \
-    <REGISTRY>/dev-sys-cloud:latest
+    crpi-3enaq3tmd2p19mdc.cn-hangzhou.personal.cr.aliyuncs.com/iot-platform-coffee/dev-sys-cloud:latest
 
 # 4. 验证
 curl http://localhost:9080/api/v1/health
