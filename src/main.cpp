@@ -1287,7 +1287,7 @@ int main(int argc, char* argv[]) {
             checksum = "size:" + std::to_string(req.body.size());
 #endif
             // Build download URL
-            std::string host = "127.0.0.1:9901";
+            std::string host = "127.0.0.1:9080";
             auto hit = req.headers.find("Host");
             if (hit != req.headers.end()) host = hit->second;
             std::string dl_url = "http://" + host + "/api/v1/ota/firmwares/download/"
@@ -2290,7 +2290,7 @@ int main(int argc, char* argv[]) {
                 + std::to_string(account_id) + R"(,"deleted":true}})");
         });
 
-    int api_port = 9901;
+    int api_port = 9080;
     const char* env_port = std::getenv("API_PORT");
     if (env_port) api_port = std::stoi(env_port);
     char api_base[64];
