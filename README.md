@@ -172,6 +172,10 @@ docker run -d --name dev-sys-cloud \
 # 4. 验证
 curl http://localhost:9080/api/v1/health
 docker logs -f dev-sys-cloud
+
+# log
+docker logs --tail 30 dev-sys-cloud
+docker logs  dev-sys-cloud
 ```
 
 ### 方式二：Docker 离线包

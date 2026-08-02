@@ -15,6 +15,8 @@
 #include <regex>
 #include <sys/socket.h>
 #include <netdb.h>
+#include <ifaddrs.h>
+#include <arpa/inet.h>
 #include <cstring>
 
 #ifdef HAS_OPENSSL
@@ -48,6 +50,34 @@ void signal_handler(int sig) {
     (void)sig;
     std::cout << "\n[Main] Shutting down (signal " << sig << ")..." << std::endl;
     g_running = false;
+}
+
+// ============================================================
+// Helper — detect server's primary non-loopback IP address
+// Used to provide a reachable mqtt_broker_uri to devices
+// ============================================================
+static std::string detect_server_ip() {
+    struct ifaddrs* ifa = nullptr;
+    if (getifaddrs(&ifa) != 0) return "127.0.0.1";
+    std::string result = "127.0.0.1";
+    for (struct ifaddrs* p = ifa; p; p = p->ifa_next) {
+        if (!p->ifa_addr || p->ifa_addr->sa_family != AF_INET) continue;
+        // Skip loopback
+        if (std::string(p->ifa_name) == "lo") continue;
+        char buf[INET_ADDRSTRLEN];
+        auto* addr = &((struct sockaddr_in*)p->ifa_addr)->sin_addr;
+        inet_ntop(AF_INET, addr, buf, sizeof(buf));
+        std::string ip(buf);
+        // Skip docker bridge, prefer eth*/ens*/enp* for first result
+        if (ip == "172.17.0.1") continue; // docker0
+        result = ip;
+        // Prefer physical interfaces
+        std::string name(p->ifa_name);
+        if (name.find("eth") == 0 || name.find("ens") == 0 || name.find("enp") == 0)
+            break;
+    }
+    freeifaddrs(ifa);
+    return result;
 }
 
 // ============================================================
@@ -120,15 +150,23 @@ int main(int argc, char* argv[]) {
             broker_api_port = ji("broker_api_port", 8080);
             mqtt_user = jg("username");
             mqtt_pass = jg("password");
-            std::cout << "[Main] MQTT broker: " << broker_host << ":" << broker_port
-                      << "  API: " << broker_host << ":" << broker_api_port
-                      << "  user: " << mqtt_user << std::endl;
         }
+    }
+    // Auto-detect server IP if broker_host is a loopback address
+    // (devices need a real IP to connect to MQTT)
+    if (broker_host == "127.0.0.1" || broker_host == "localhost" || broker_host == "::1") {
+        std::string detected = detect_server_ip();
+        std::cout << "[Main] Detected server IP: " << detected
+                  << " (replacing loopback " << broker_host << ")" << std::endl;
+        broker_host = detected;
     }
     auto mqtt_broker_uri = std::make_shared<std::string>(
         "tcp://" + broker_host + ":" + std::to_string(broker_port));
     auto mqtt_broker_api = std::make_shared<std::string>(
         "http://" + broker_host + ":" + std::to_string(broker_api_port));
+    std::cout << "[Main] MQTT broker: " << broker_host << ":" << broker_port
+              << "  API: " << broker_host << ":" << broker_api_port
+              << "  user: " << mqtt_user << std::endl;
 
     Database db;
     // PostgreSQL connection string (libpq format)
@@ -286,7 +324,7 @@ int main(int argc, char* argv[]) {
                  << "\"device_id\":\"" << resp.device_id << "\","
                  << "\"model_key\":\"" << resp.model_key << "\","
                  << "\"model_code\":\"" << resp.model_code << "\","
-                 << "\"tenant_id\":\"" << resp.tenant_id << "\","
+                 << "\"tenant_name\":\"" << resp.tenant_id << "\","
                  << "\"product_id\":\"" << resp.product_id << "\","
                  << "\"device_type\":\"" << resp.device_type << "\","
                  << "\"firmware_version\":\"" << resp.firmware_version << "\","
@@ -1763,13 +1801,28 @@ int main(int argc, char* argv[]) {
             }
         }
 
-        // Fallback: query local database tenants table
+        // Fallback: query local database — check organizations, tenants, then mqtt_tenant_config
         if (!key.empty()) {
-            std::ostringstream sql;
-            sql << "SELECT name FROM tenants WHERE tenant_id='"
-                << key << "' AND active=TRUE";
             std::vector<std::vector<std::string>> rows;
+            std::ostringstream sql;
+            // Check organizations first (better display names)
+            sql << "SELECT org_name FROM organizations WHERE tenant_id='"
+                << key << "' AND is_active=TRUE";
             if (db.query(sql.str(), rows) == StatusCode::OK && !rows.empty() && !rows[0].empty()) {
+                return {true, rows[0][0]};
+            }
+            // Check tenants table
+            std::ostringstream sql2;
+            sql2 << "SELECT name FROM tenants WHERE tenant_id='"
+                 << key << "' AND active=TRUE";
+            if (db.query(sql2.str(), rows) == StatusCode::OK && !rows.empty() && !rows[0].empty()) {
+                return {true, rows[0][0]};
+            }
+            // Check mqtt_tenant_config — the tenant_key stored there IS the MQTT broker key
+            std::ostringstream sql3;
+            sql3 << "SELECT tenant_name FROM mqtt_tenant_config WHERE tenant_key='"
+                 << key << "' AND id=1";
+            if (db.query(sql3.str(), rows) == StatusCode::OK && !rows.empty() && !rows[0].empty()) {
                 return {true, rows[0][0]};
             }
         }
@@ -2344,12 +2397,15 @@ int main(int argc, char* argv[]) {
 
     // 订阅所有设备上行topic（通配符）
     auto topics = MessageRouter::subscription_topics();
+    std::cout << "[Main] === MQTT Subscriptions ===" << std::endl;
     for (const auto& t : topics) {
         mqtt.subscribe(t, 1);
+        std::cout << "[Main]   Subscribed: " << t << std::endl;
         log_mgr.info("main", "Subscribed: " + t);
     }
     // 额外订阅设备状态Topic（Will Message用）
     mqtt.subscribe("+/iot/+/+/status", 1);
+    std::cout << "[Main]   Subscribed: +/iot/+/+/status" << std::endl;
     log_mgr.info("main", "Subscribed: +/iot/+/+/status");
 
     // 发布服务上线通知

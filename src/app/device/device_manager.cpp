@@ -65,7 +65,7 @@ StatusCode DeviceManager::register_device(const Device& device) {
     std::lock_guard<std::mutex> lock(mutex_);
     tenants_[device.tenant_id].map[device.device_id] = device;
     if (db_) {
-        StatusCode sc = db_->insert_device(device);
+        StatusCode sc = db_->upsert_device(device);
         if (sc != StatusCode::OK) {
             std::cerr << "[DeviceMgr] Failed to persist device: " << device.device_id << std::endl;
             return sc;

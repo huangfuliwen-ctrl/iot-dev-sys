@@ -1152,6 +1152,17 @@ std::vector<FirmwareVersion> Database::list_all_firmwares() {
 // Organizations CRUD
 // ============================================================
 StatusCode Database::insert_org(const OrgInfo& info) {
+    // Sync tenant_id to tenants table (for MQTT broker tenant key verification)
+    {
+        std::ostringstream tsql;
+        tsql << "INSERT INTO tenants (tenant_id, name) VALUES ("
+             << sql_str(info.tenant_id) << "," << sql_str(info.org_name)
+             << ") ON CONFLICT (tenant_id) DO UPDATE SET name="
+             << sql_str(info.org_name)
+             << ", updated_at=(EXTRACT(EPOCH FROM NOW())::BIGINT)";
+        execute(tsql.str());
+    }
+
     std::ostringstream sql;
     sql << "INSERT INTO organizations "
         << "(org_id,parent_id,tenant_id,org_name,org_type,contact_name,contact_phone,contact_email,address,is_active,level,path,children_count,created_at,updated_at) VALUES ("

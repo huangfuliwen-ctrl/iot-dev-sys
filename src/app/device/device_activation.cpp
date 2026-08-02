@@ -73,7 +73,9 @@ ActivationResponse DeviceActivation::process_activation(const ActivationRequest&
     }
 
     // Step 4: Tenant assigned by server (from DB config), NOT from device request
-    std::string tenant = default_tenant_.empty() ? "default" : default_tenant_;
+    // Read from DB at activation time so runtime config changes take effect
+    std::string tenant = db_.load_tenant_config("tenant_name");
+    if (tenant.empty()) tenant = "default";
     {
         std::ostringstream sql;
         sql << "INSERT INTO tenants (tenant_id, name) VALUES ('"
