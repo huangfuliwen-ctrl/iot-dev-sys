@@ -132,4 +132,20 @@ StatusCode FaultManager::load_from_database() {
     std::cout << "[FaultMgr] Loaded " << faults.size() << " faults (" << active_faults_.size() << " active) from database" << std::endl;
     return StatusCode::OK;
 }
+
+void FaultManager::reassign_unknown_devices(const std::set<std::string>& valid_ids,
+                                            const std::string& target_device) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    int reassigned = 0;
+    for (auto& f : active_faults_) {
+        if (valid_ids.find(f.device_id) == valid_ids.end()) {
+            f.device_id = target_device;
+            reassigned++;
+        }
+    }
+    if (reassigned > 0) {
+        std::cout << "[FaultMgr] Reassigned " << reassigned
+                  << " faults to existing device " << target_device << std::endl;
+    }
+}
 } // namespace dev_sys

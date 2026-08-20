@@ -7,6 +7,7 @@
 #include <string>
 #include <functional>
 #include <mutex>
+#include <set>
 
 namespace dev_sys {
 
@@ -42,6 +43,9 @@ public:
     void seed_mock_data();
     void set_database(class Database* db) { db_ = db; }
     StatusCode load_from_database();
+    // Reassign faults whose device_id is not in valid_ids to target_device
+    void reassign_unknown_devices(const std::set<std::string>& valid_ids,
+                                  const std::string& target_device);
 
 private:
     mutable std::mutex mutex_;

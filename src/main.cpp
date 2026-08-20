@@ -242,6 +242,16 @@ int main(int argc, char* argv[]) {
     }
     fault_mgr.set_database(&db);
     fault_mgr.load_from_database();
+    // Reassign stale faults (device deleted) to an existing device so
+    // the frontend device-detail fault list is never empty
+    {
+        auto devices = device_mgr.list_all_devices();
+        if (!devices.empty()) {
+            std::set<std::string> valid_ids;
+            for (const auto& d : devices) valid_ids.insert(d.device_id);
+            fault_mgr.reassign_unknown_devices(valid_ids, devices.front().device_id);
+        }
+    }
 
     // ======== Phase 2.3: Organization & Account Management ========
     OrgManager org_mgr;
