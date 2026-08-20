@@ -1550,7 +1550,12 @@ int main(int argc, char* argv[]) {
                 json << R"("level":)" << static_cast<int>(f.level) << ",";
                 json << R"("description":")" << f.description << R"(",)";
                 json << R"("ts":)" << ((f.timestamp.empty() || f.timestamp.find_first_not_of("0123456789") != std::string::npos) ? "0" : f.timestamp) << ",";
-                json << R"("sensor_snapshot":)" << (f.sensor_snapshot.empty() ? "null" : f.sensor_snapshot);
+                {
+                    // Validate sensor_snapshot is real JSON before embedding raw
+                    bool valid_json = !f.sensor_snapshot.empty()
+                        && (f.sensor_snapshot[0] == '{' || f.sensor_snapshot[0] == '[');
+                    json << R"("sensor_snapshot":)" << (valid_json ? f.sensor_snapshot : "null");
+                }
                 json << "}";
             }
             json << "]}}";
