@@ -645,9 +645,16 @@ FaultInfo Database::fault_from_row(const std::vector<std::string>& row) const {
     // Legacy mapping: old L3/L4→ERROR, L0-L2→WARNING
     { int ol = std::stoi(row[4]); f.level = (ol >= 3) ? FaultLevel::ERROR : FaultLevel::WARNING; }
     f.description    = row[5];
-    // row[6] is resolved (BOOLEAN), skip
-    f.sensor_snapshot = row.size() > 7 ? row[7] : "";
-    f.timestamp      = row.size() > 8 ? row[8] : "0";
+    // Column order: id, tenant_id, device_id, code, level, description,
+    //               created_at, resolved, sensor_snapshot
+    f.timestamp      = row.size() > 6 ? row[6] : "0";
+    f.sensor_snapshot = row.size() > 8 ? row[8] : "";
+    // Normalize corrupted timestamps (non-numeric values from old runs)
+    if (f.timestamp.empty() || f.timestamp == "f"
+        || f.timestamp.find_first_not_of("0123456789") != std::string::npos) {
+        f.timestamp = std::to_string(std::chrono::duration_cast<std::chrono::seconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count());
+    }
     return f;
 }
 
