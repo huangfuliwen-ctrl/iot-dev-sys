@@ -1574,12 +1574,13 @@ int main(int argc, char* argv[]) {
     api.get("/api/v1/faults/{device_id}",
         [&fault_mgr](const HttpRequest& req) -> HttpResponse {
             std::string device_id = req.path.substr(std::string("/api/v1/faults/").size());
-            // Parse ?tenant_id= from path or use default
+            // Parse tenant_id from req.query (already stripped from path by ApiServer)
             std::string tenant_id = "default";
-            size_t qpos = device_id.find("?tenant_id=");
+            size_t qpos = req.query.find("tenant_id=");
             if (qpos != std::string::npos) {
-                tenant_id = device_id.substr(qpos + 11);
-                device_id = device_id.substr(0, qpos);
+                tenant_id = req.query.substr(qpos + 10);
+                size_t amp = tenant_id.find('&');
+                if (amp != std::string::npos) tenant_id = tenant_id.substr(0, amp);
             }
             auto faults = fault_mgr.faults_by_device(tenant_id, device_id);
             std::ostringstream json;
